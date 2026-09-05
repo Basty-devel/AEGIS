@@ -20,3 +20,12 @@ repository = "https://github.com/Basty-devel/AEGIS"
 # identified FFI/hardware-binding crates, which override this with a
 # narrowly scoped `#[allow(unsafe_code)]` at the point of use.
 unsafe_code = "deny"
+
+[patch.crates-io]
+# One-line fix (a missing const-generic array-size table entry,
+# `513 => U513,`) that `primeorder::PrimeCurveParams` needs for
+# bp512-nestler's 512-bit scalar. Already merged upstream, not yet
+# released — see vendor/hybrid-array-0.4.14/README.md and
+# https://github.com/RustCrypto/hybrid-array/issues/66. Delete this
+# patch and the vendor/ copy once a release covers size 513.
+hybrid-array = { path = "vendor/hybrid-array-0.4.14" }
