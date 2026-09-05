@@ -29,6 +29,16 @@ unsafe_code = "deny"
 # https://github.com/RustCrypto/hybrid-array/issues/66. Delete this
 # patch and the vendor/ copy once a release covers size 513.
 #
+# TODO(unblock-crates-io-publish): the fix landed in PR #233
+# (https://github.com/RustCrypto/hybrid-array/pull/233, merged
+# 2026-08-11) but is only on `main` — no release since 0.4.14
+# (2026-07-30) includes it yet. `cargo publish -p aegis-crypto`
+# will keep failing verification until hybrid-array cuts a release
+# >0.4.14 (check `cargo info hybrid-array` or
+# https://crates.io/crates/hybrid-array), because `[patch]` is
+# workspace-local and does not carry over to published-crate
+# consumers. Do not publish aegis-crypto before that lands.
+#
 # BLAST RADIUS: `[patch.crates-io]` is workspace-wide and cannot be
 # scoped to one dependency. Although the only crate that *needs* the
 # patch is `bp512-nestler` (via `primeorder`), this replacement of
