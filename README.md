@@ -164,50 +164,6 @@ Everything left of the trust-boundary line is assumed honest (subject to [device
 | `aegis-ffi` | N/A (no independent identity) | Mitigated: UniFFI-generated bindings are type-checked; no raw pointer arithmetic crosses the boundary | N/A | Care required: host-language garbage collectors (Kotlin/Swift) may retain copies of key material passed across FFI longer than Rust's `Zeroize` can reach — tracked as an open hardening item, see [Non-Goals](#non-goals) | N/A | Mitigated: `#![forbid(unsafe_code)]` on the Rust side of the boundary |
 | `platforms/` | Mitigated: platform UI cannot forge protocol messages, only display them | OS clipboard, notification previews, and screenshots are **outside AEGIS's control** and are a well-known leak path — mitigated via notification content redaction and clipboard auto-clear timers, not eliminated | User can always deny having sent a message (deniability is intentional) | **Highest-likelihood leak point in practice**: shoulder-surfing, notification previews on lock screen, OS-level screenshot/backup services | Platform-level app freezing/killing is an OS decision AEGIS cannot prevent | Mitigated by OS app sandboxing (GrapheneOS hardened sandbox recommended) |
 
-### Representative Attack Scenarios
-
-**Scenario 1 — Global passive adversary attempts traffic correlation (A1).**
-Mitigation: All traffic is carried over Tor (`arti`) with fixed 4 KB packet padding and constant-rate cover traffic during active sessions. Residual risk: a global adversary with end-to-end timing correlation across enough of the Tor network can still, in principle, deanonymize a *specific targeted* circuit — this is a known, published limitation of Tor itself and is not something any Tor-based application layer can fully close. AEGIS reduces but does not eliminate this class of risk; this is stated explicitly rather than implied away.
-
-**Scenario 2 — Malicious relay attempts to build a social graph (A3).**
-A relay operator sees which capability tokens connect to which mailboxes and when. Sealed Sender 2.0 removes long-term sender identity from this view. Residual risk: connection timing and mailbox identifiers themselves are a coarse-grained social graph proxy if a single relay operator hosts both communicating parties' mailboxes — mitigated by encouraging mailbox placement diversity across independent federation operators, not eliminated by protocol alone.
-
-**Scenario 3 — Device seizure with device locked and powered off (A6, primary design target).**
-Vault master key is derived via Argon2id from a passphrase combined with a TEE/StrongBox-sealed hardware secret; neither half alone yields the key. Cold-boot and chip-off attacks against a powered-off, locked device are mitigated to the extent the underlying Titan M2/TEE implementation resists them — this delegates a real slice of the security boundary to Google/hardware vendor firmware, which is **not** audited by this project and is tracked as a supply-chain trust dependency.
-
-**Scenario 4 — Device seizure with device unlocked, in the adversary's possession, and running (A6, worst case).**
-Not fully mitigated by any messenger, AEGIS included. If the vault is unlocked, ratchet state and recent plaintext may be resident in RAM. AEGIS reduces the window (aggressive key zeroization on backgrounding/lock, MTE-enforced memory tagging on supported hardware) but a live, unlocked device in an adversary's hands is a fundamentally different threat than a seized, locked one. This is stated as a hard limit, not a solved problem.
-
-**Scenario 5 — Compelled relay operator under legal process (A4).**
-A single relay operator can be compelled to log connection metadata it legitimately observes (Scenario 2's leakage) or to degrade/deny service for mailboxes it hosts. It **cannot** be compelled to produce plaintext (never possesses keys) or to forge messages (no signing authority over identity keys). Federation is designed so no single operator, even under full legal compulsion, holds a monopoly on delivery for any given user — provided that user has configured relay diversity, which is a **user/operator configuration responsibility**, not an automatic guarantee.
-
-**Scenario 6 — Harvest-now-decrypt-later against recorded ciphertext (A5).**
-All key exchange uses hybrid KEM (ML-KEM-1024 + brainpool512r1); an adversary must break **both** the post-quantum and classical component to recover a session key, even with a future cryptographically relevant quantum computer. Signatures are similarly hybrid (ML-DSA-87 + Ed25519). Residual risk: this depends on ML-KEM-1024 and ML-DSA-87 remaining unbroken — a cryptanalytic break of the NIST PQC standards themselves is outside any single project's ability to mitigate and is why [algorithm agility](#cryptographic-agility--versioning) is a first-class design requirement, not an afterthought.
-
-### Out of Scope
-
-The following are explicitly **not** protected against by AEGIS, regardless of configuration:
-
-* Full compromise of an endpoint device via malware, jailbreak/root exploit chains, or a malicious OS — AEGIS assumes the OS and hardware beneath it (GrapheneOS + Titan M2 recommendation exists specifically to raise this floor, but AEGIS cannot verify it did so).
-* A malicious or coerced *counterparty* who leaks, forwards, or screenshots plaintext after legitimate decryption. No messenger can cryptographically prevent a recipient from doing this.
-* Physical coercion of a user to unlock an already-authenticated device in their presence ("$5 wrench attack" / rubber-hose cryptanalysis). This is a personal-safety problem outside software's reach.
-* Correctness or backdoor-freedom of the underlying hardware TEE/StrongBox/Secure Enclave firmware, or of the Rust compiler/toolchain supply chain (see [Non-Goals](#non-goals) for what is tracked instead: reproducible builds and SBOM).
-* Deanonymization by an adversary who controls a majority of the Tor network's guard/exit capacity, or who can compel the *majority* of independent federation relay operators simultaneously.
-* Availability guarantees against a global, sustained denial-of-service against the entire federation (federation reduces single-point failure, it does not grant infinite resilience).
-
-### Residual Metadata Risk
-
-AEGIS advertises "strict metadata elimination" and "zero PII collection" — both true relative to Signal, neither absolute. What remains observable to a sufficiently positioned adversary:
-
-* **Connection timing and message size buckets** at the relay a mailbox is hosted on (mitigated by padding to fixed buckets, not eliminated — bucket count itself is residual signal).
-* **Approximate account activity cadence** (online/offline patterns) unless constant-rate cover traffic is enabled, which has a real, user-facing battery/bandwidth cost and is therefore configurable rather than unconditionally forced on.
-* **Which relay(s) a device connects to**, observable to that user's ISP/local network (A2) even though Tor hides the relay's view of the client's real IP. Mitigated by Tor, not eliminated at the observation-of-*a*-Tor-connection-exists level (Tor usage itself can be fingerprinted by some network observers, a well-known limitation of the Tor project generally, inherited here rather than introduced by AEGIS).
-* **Group membership size and approximate cadence**, inferable by any relay hosting a shared group mailbox, even without content or identity.
-
-This subsection exists so that "zero metadata" is never read as an absolute claim in this document.
-
----
-
 ## Cryptographic Agility & Versioning
 
 * All wire-format messages carry an explicit algorithm-suite identifier; suite negotiation is authenticated as part of session establishment so a network adversary cannot force a downgrade to a weaker suite (no silent fallback).
