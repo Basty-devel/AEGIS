@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aegis-core",
+    "crates/aegis-crypto",
+    "crates/aegis-ratchet",
+    "crates/aegis-vault",
+    "crates/aegis-file",
+    "crates/aegis-net",
+    "crates/aegis-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/Basty-devel/AEGIS"
+
+[workspace.lints.rust]
+# Spec: AEGIS.Plan.V0.2.md Section 10 — unsafe permitted only in explicitly
+# identified FFI/hardware-binding crates, which override this with a
+# narrowly scoped `#[allow(unsafe_code)]` at the point of use.
+unsafe_code = "deny"
