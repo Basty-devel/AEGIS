@@ -122,6 +122,18 @@ pub fn verify_dual(
 mod tests {
     use super::*;
 
+    /// C2 regression guard — see the equivalent test in `kem.rs`. This
+    /// one additionally pins both component key types, since ml-dsa's
+    /// `zeroize` feature is not on by default and its absence would
+    /// otherwise be invisible.
+    #[test]
+    fn dual_keypair_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<DualKeyPair>();
+        assert_zeroize_on_drop::<Ed25519SigningKey>();
+        assert_zeroize_on_drop::<MlDsa87SigningKey<MlDsa87>>();
+    }
+
     #[test]
     fn valid_dual_signature_verifies() {
         let keypair = DualKeyPair::generate();

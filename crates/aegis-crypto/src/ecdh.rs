@@ -112,6 +112,22 @@ pub fn brainpool512_diffie_hellman(
 mod tests {
     use super::*;
 
+    /// C2 regression guard — see the equivalent test in `kem.rs`.
+    /// `elliptic_curve::SecretKey` zeroizes unconditionally (zeroize is
+    /// a mandatory dependency of that crate), so this pins a property
+    /// we rely on rather than one we had to switch on.
+    #[test]
+    fn secret_key_and_shared_secret_zeroize() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<SecretKey<BrainpoolP512r1>>();
+        assert_zeroize_on_drop::<elliptic_curve::ecdh::SharedSecret<BrainpoolP512r1>>();
+
+        fn assert_zeroizing<T: zeroize::Zeroize>(_: &Zeroizing<T>) {}
+        let a = Brainpool512SecretKey::generate();
+        let b = Brainpool512SecretKey::generate();
+        assert_zeroizing(&brainpool512_diffie_hellman(&a, &b.public_key_bytes()).unwrap());
+    }
+
     /// RFC 7027 Appendix A.3 ("512-Bit Curve", brainpoolP512r1), the
     /// published ECDH example values, transcribed from the RFC text at
     /// <https://www.rfc-editor.org/rfc/rfc7027.txt>. Line breaks in the

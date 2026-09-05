@@ -148,6 +148,30 @@ pub fn ml_kem_decapsulate(
 mod tests {
     use super::*;
 
+    /// C2 regression guard. Zeroization cannot be observed from safe
+    /// Rust (the crate denies `unsafe`, so freed memory cannot be
+    /// inspected), but the *type-level* guarantee can be asserted at
+    /// compile time. If ml-kem's non-default `zeroize` feature is ever
+    /// dropped from Cargo.toml, `DecapsulationKey` stops implementing
+    /// `ZeroizeOnDrop`, the derive on `MlKem1024KeyPair` stops
+    /// compiling, and this test fails to build rather than silently
+    /// leaking key material.
+    #[test]
+    fn keypair_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<MlKem1024KeyPair>();
+        assert_zeroize_on_drop::<ml_kem::DecapsulationKey<MlKem1024>>();
+    }
+
+    #[test]
+    fn shared_secrets_are_returned_wrapped_for_zeroization() {
+        fn assert_zeroizing<T: zeroize::Zeroize>(_: &Zeroizing<T>) {}
+        let keypair = MlKem1024KeyPair::generate();
+        let (ciphertext, secret) = ml_kem_encapsulate(&keypair.encapsulation_key_bytes()).unwrap();
+        assert_zeroizing(&secret);
+        assert_zeroizing(&ml_kem_decapsulate(&keypair, &ciphertext).unwrap());
+    }
+
     #[test]
     fn encapsulate_then_decapsulate_recovers_shared_secret() {
         let keypair = MlKem1024KeyPair::generate();

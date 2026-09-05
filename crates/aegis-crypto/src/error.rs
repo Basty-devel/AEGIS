@@ -108,16 +108,6 @@ impl fmt::Display for CryptoError {
 
 impl std::error::Error for CryptoError {}
 
-impl From<hkdf::InvalidLength> for CryptoError {
-    fn from(_: hkdf::InvalidLength) -> Self {
-        // `hkdf::InvalidLength` carries no detail; the only way to
-        // provoke it is an over-long requested output, so the requested
-        // length is filled in by the caller that has it. This impl
-        // exists for the degenerate case where it isn't available.
-        Self::KdfOutputLength { requested: 0 }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::CryptoError;
