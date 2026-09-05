@@ -20,6 +20,7 @@ version = "0.1.0"
 name = "aegis-crypto"
 version = "0.1.0"
 dependencies = [
+ "aead",
  "aes-gcm",
  "argon2",
  "blake3",
