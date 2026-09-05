@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="de" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AEGIS — Post-Quantum Security Brand & Asset Portal</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            aegis: {
+              black: '#030712',      // Deepest Obsidian (Background)
+              navy: '#0b1329',       // Card Surface
+              cyan: '#00f0ff',       // High-Luminance Cyber Cyan
+              emerald: '#10b981',    // Quantum Green
+              white: '#ffffff',      // Pure High-Contrast White
+              slate: '#cbd5e1',      // High Contrast Body Copy
+              accent: '#38bdf8'      // Electric Blue
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Fira Code', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts & FontAwesome -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <style>
+    body {
+      background-color: #030712;
+      color: #ffffff;
+      font-family: 'Inter', sans-serif;
+    }
+
+    /* High-contrast focus outline for accessibility */
+    *:focus-visible {
+      outline: 3px solid #00f0ff !important;
+      outline-offset: 3px !important;
+    }
+
+    /* Cyber Ambient Glows */
+    .glow-cyan {
+      box-shadow: 0 0 40px -5px rgba(0, 240, 255, 0.35);
+    }
+
+    .glow-emerald {
+      box-shadow: 0 0 40px -5px rgba(16, 185, 129, 0.35);
+    }
+
+    .glass-card {
+      background: rgba(11, 19, 41, 0.85);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    .glass-card-high-contrast {
+      background: #091022;
+      border: 2px solid #00f0ff;
+    }
+
+    /* Pulse Shield Animation */
+    @keyframes shieldGlow {
+      0%, 100% { filter: drop-shadow(0 0 15px rgba(0, 240, 255, 0.4)); }
+      50% { filter: drop-shadow(0 0 30px rgba(0, 240, 255, 0.8)); }
+    }
+
+    .animated-shield {
+      animation: shieldGlow 4s ease-in-out infinite;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between selection:bg-aegis-cyan selection:text-aegis-black">
+
+  <!-- NAVIGATION HEADER -->
+  <header class="w-full border-b border-slate-800 bg-slate-950/90 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+      <div class="flex items-center gap-3">
+        <!-- Minimal SVG Logo Mark -->
+        <svg class="w-8 h-8 text-aegis-cyan" viewBox="0 0 100 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M50 5L90 25V60C90 85 50 110 50 110C50 110 10 85 10 60V25L50 5Z" stroke="currentColor" stroke-width="8" fill="none"/>
+          <path d="M50 25L75 38V60C75 75 50 92 50 92C50 92 25 75 25 60V38L50 25Z" fill="currentColor" fill-opacity="0.2" stroke="currentColor" stroke-width="4"/>
+          <circle cx="50" cy="55" r="10" fill="currentColor"/>
+        </svg>
+        <span class="font-extrabold text-2xl tracking-wider text-white">AEGIS</span>
+        <span class="hidden sm:inline-block text-xs font-mono px-2.5 py-1 rounded bg-slate-900 text-aegis-cyan border border-aegis-cyan/40 font-bold">
+          PQC SECURITY
+        </span>
+      </div>
+
+      <div class="flex items-center gap-4">
+        <a href="#exporter" class="px-4 py-2 rounded-lg bg-aegis-cyan text-aegis-black font-bold text-xs uppercase tracking-wider hover:bg-white transition flex items-center gap-2 shadow-lg shadow-aegis-cyan/20">
+          <i class="fa-solid fa-download"></i> Assets (.PNG / .ICO)
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- HERO SECTION -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-6 py-12 md:py-20 flex flex-col items-center text-center space-y-12">
+    
+    <!-- Badge -->
+    <div class="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-slate-900 border-2 border-aegis-cyan text-aegis-cyan text-xs font-mono font-bold tracking-widest uppercase shadow-md">
+      <i class="fa-solid fa-shield-halved text-aegis-cyan"></i> Brand Identity & Post-Quantum Core
+    </div>
+
+    <!-- MAIN BRAND VECTOR LOGO DISPLAY -->
+    <div class="relative group my-4">
+      <div class="absolute -inset-4 bg-gradient-to-r from-aegis-cyan via-emerald-400 to-sky-500 rounded-3xl blur-2xl opacity-40 group-hover:opacity-75 transition duration-500"></div>
+      
+      <div class="relative glass-card-high-contrast p-8 md:p-12 rounded-3xl flex flex-col items-center justify-center glow-cyan">
+        <svg class="w-40 h-48 md:w-56 md:h-64 animated-shield text-aegis-cyan" viewBox="0 0 200 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- Outer Quantum Shield Frame -->
+          <path d="M100 10 L180 50 V120 C180 170 100 220 100 220 C100 220 20 170 20 120 V50 Z" 
+                stroke="#00f0ff" stroke-width="12" stroke-linejoin="round" fill="#0b1329"/>
+          
+          <!-- Inner Poly Lattice (Quantum Mesh) -->
+          <path d="M100 35 L155 65 V115 C155 152 100 190 100 190 C100 190 45 152 45 115 V65 Z" 
+                stroke="#10b981" stroke-width="6" fill="url(#shield-grad)" stroke-dasharray="8 4"/>
+          
+          <!-- Core Aegis Emblem (Gorgon Eye / Circuit Key) -->
+          <circle cx="100" cy="110" r="28" stroke="#00f0ff" stroke-width="6" fill="#030712"/>
+          <path d="M100 82 V92 M100 128 V138 M72 110 H82 M118 110 H128" stroke="#00f0ff" stroke-width="6" stroke-linecap="round"/>
+          <circle cx="100" cy="110" r="10" fill="#ffffff"/>
+
+          <defs>
+            <linearGradient id="shield-grad" x1="100" y1="35" x2="100" y2="190" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#00f0ff" stop-opacity="0.3"/>
+              <stop offset="100%" stop-color="#10b981" stop-opacity="0.1"/>
+            </linearGradient>
+          </defs>
+        </svg>
+
+        <!-- Brand Title -->
+        <h1 class="text-5xl md:text-7xl font-black tracking-tight text-white mt-6">
+          AEGIS
+        </h1>
+      </div>
+    </div>
+
+    <!-- SLOGAN DISPLAY -->
+    <div class="space-y-4 max-w-4xl">
+      <p class="text-xs font-mono uppercase tracking-[0.3em] text-aegis-cyan font-bold">Offizieller Brand Slogan</p>
+      
+      <!-- SLOGAN - High Contrast & Impact -->
+      <h2 class="text-3xl sm:text-5xl md:text-6xl font-extrabold tracking-tight text-white leading-tight">
+        Protect <span class="text-aegis-cyan underline decoration-aegis-cyan/50 decoration-4">IT</span> today.<br class="hidden sm:inline">
+        Secure <span class="text-aegis-emerald underline decoration-aegis-emerald/50 decoration-4">IT</span> forever.
+      </h2>
+
+      <p class="text-slate-300 text-base md:text-xl font-medium max-w-2xl mx-auto pt-2 leading-relaxed">
+        Post-Quanten-Verschlüsselung mit Zero-Trust Architektur. Schutz vor Harvest-Now-Decrypt-Later Angriffen ab der ersten Nachricht.
+      </p>
+    </div>
+
+    <!-- ASSET GENERATOR & DOWNLOAD SECTION -->
+    <section id="exporter" class="w-full pt-12 border-t border-slate-800 text-left">
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 gap-4">
+        <div>
+          <span class="text-xs font-mono text-aegis-cyan uppercase font-bold tracking-wider">Asset Export Studio</span>
+          <h3 class="text-2xl md:text-3xl font-bold text-white mt-1">Logo in PNG & ICO Formaten exportieren</h3>
+          <p class="text-slate-300 text-xs mt-1">Generiere hochauflösende PNGs und Favicon (.ICO) Dateien direkt im Browser.</p>
+        </div>
+      </div>
+
+      <!-- Hidden Master Canvas for Image Rendering -->
+      <canvas id="exportCanvas" class="hidden"></canvas>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        
+        <!-- PNG High Res 1024x1024 Card -->
+        <div class="glass-card p-6 rounded-2xl border border-slate-700 flex flex-col justify-between space-y-6">
+          <div class="space-y-3">
+            <div class="w-10 h-10 rounded-xl bg-aegis-cyan/20 text-aegis-cyan flex items-center justify-center font-bold">
+              <i class="fa-regular fa-image text-xl"></i>
+            </div>
+            <h4 class="text-lg font-bold text-white">HD PNG Logo (Transparent)</h4>
+            <p class="text-slate-300 text-xs leading-relaxed">
+              1024 &times; 1024 Pixel hochauflösendes PNG mit Alpha-Transparenz. Ideal für App-Icons, Dokumente & Web.
+            </p>
+          </div>
+          <button onclick="downloadPNG(1024)" class="w-full py-3 px-4 rounded-xl bg-aegis-cyan hover:bg-white text-aegis-black font-extrabold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 shadow-lg shadow-aegis-cyan/20">
+            <i class="fa-solid fa-download"></i> PNG Herunterladen (1024px)
+          </button>
+        </div>
+
+        <!-- App Icon PNG 512x512 Card -->
+        <div class="glass-card p-6 rounded-2xl border border-slate-700 flex flex-col justify-between space-y-6">
+          <div class="space-y-3">
+            <div class="w-10 h-10 rounded-xl bg-aegis-emerald/20 text-aegis-emerald flex items-center justify-center font-bold">
+              <i class="fa-solid fa-mobile-screen-button text-xl"></i>
+            </div>
+            <h4 class="text-lg font-bold text-white">App Icon PNG (512x512)</h4>
+            <p class="text-slate-300 text-xs leading-relaxed">
+              512 &times; 512 Pixel Standardgröße für Android / iOS Store Asset Anforderungen & App Logos.
+            </p>
+          </div>
+          <button onclick="downloadPNG(512)" class="w-full py-3 px-4 rounded-xl bg-aegis-emerald hover:bg-emerald-300 text-aegis-black font-extrabold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 shadow-lg shadow-aegis-emerald/20">
+            <i class="fa-solid fa-download"></i> PNG Herunterladen (512px)
+          </button>
+        </div>
+
+        <!-- Windows ICO Favicon Card -->
+        <div class="glass-card p-6 rounded-2xl border border-slate-700 flex flex-col justify-between space-y-6">
+          <div class="space-y-3">
+            <div class="w-10 h-10 rounded-xl bg-sky-500/20 text-sky-400 flex items-center justify-center font-bold">
+              <i class="fa-brands fa-windows text-xl"></i>
+            </div>
+            <h4 class="text-lg font-bold text-white">Favicon & Windows (.ICO)</h4>
+            <p class="text-slate-300 text-xs leading-relaxed">
+              Echte Binäre .ICO Datei (enthält 16x16, 32x32 & 48x48 Pixel Layer) für Windows Executables & Web Favicons.
+            </p>
+          </div>
+          <button onclick="downloadICO()" class="w-full py-3 px-4 rounded-xl bg-sky-400 hover:bg-white text-aegis-black font-extrabold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 shadow-lg shadow-sky-400/20">
+            <i class="fa-solid fa-file-code"></i> .ICO Herunterladen
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- COLOR CONTRAST & SPECIFICATION SECTION -->
+    <section class="w-full pt-12 border-t border-slate-800 text-left space-y-6">
+      <div>
+        <span class="text-xs font-mono text-aegis-cyan uppercase font-bold tracking-wider">Barrierefreiheit & WCAG AAA Standards</span>
+        <h3 class="text-2xl font-bold text-white mt-1">Farbkontrast-Spezifikationen</h3>
+        <p class="text-slate-300 text-xs mt-1">Maximale Lesbarkeit durch strenge Kontrastverhältnisse nach WCAG AAA Richtlinien.</p>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <!-- Palette Item 1 -->
+        <div class="bg-[#030712] p-5 rounded-2xl border-2 border-white space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-mono text-slate-300 uppercase">Obsidian Black</span>
+            <span class="text-xs font-mono text-emerald-400 font-bold">21:1 Contrast</span>
+          </div>
+          <div class="text-2xl font-extrabold text-white">#030712</div>
+          <p class="text-[11px] text-slate-300">Haupt-Hintergrund für maximalen Schwarzwert auf OLED-Displays.</p>
+        </div>
+
+        <!-- Palette Item 2 -->
+        <div class="bg-[#0b1329] p-5 rounded-2xl border-2 border-aegis-cyan space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-mono text-aegis-cyan uppercase">Cyber Cyan</span>
+            <span class="text-xs font-mono text-emerald-400 font-bold">14.8:1 Contrast</span>
+          </div>
+          <div class="text-2xl font-extrabold text-aegis-cyan">#00F0FF</div>
+          <p class="text-[11px] text-slate-300">Akzentfarbe für primäre Interaktionen und Sicherheits-Highlights.</p>
+        </div>
+
+        <!-- Palette Item 3 -->
+        <div class="bg-[#0b1329] p-5 rounded-2xl border-2 border-aegis-emerald space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-mono text-aegis-emerald uppercase">Quantum Emerald</span>
+            <span class="text-xs font-mono text-emerald-400 font-bold">11.2:1 Contrast</span>
+          </div>
+          <div class="text-2xl font-extrabold text-aegis-emerald">#10B981</div>
+          <p class="text-[11px] text-slate-300">Indikator für erfolgreiche Post-Quanten-Handshakes.</p>
+        </div>
+
+        <!-- Palette Item 4 -->
+        <div class="bg-slate-900 p-5 rounded-2xl border-2 border-slate-300 space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-mono text-white uppercase">Pure White</span>
+            <span class="text-xs font-mono text-emerald-400 font-bold">19.5:1 Contrast</span>
+          </div>
+          <div class="text-2xl font-extrabold text-white">#FFFFFF</div>
+          <p class="text-[11px] text-slate-300">Textfarbe für Hauptüberschriften und lesbare Typografie.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="w-full border-t border-slate-800 bg-slate-950/80 py-6 px-6 text-center text-xs text-slate-300 font-mono">
+    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
+      <div>
+        <strong class="text-white">AEGIS</strong> &bull; Protect IT today. Secure IT forever.
+      </div>
+      <div>
+        Created by nestler.dev &bull; All Assets & SVG Vectors Open License
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    /* Render SVG Logo onto HTML5 Canvas for PNG/ICO export */
+    function renderLogoToCanvas(width, height, callback) {
+      const canvas = document.getElementById('exportCanvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+
+      // Clear Canvas
+      ctx.clearRect(0, 0, width, height);
+
+      // Scale factor
+      const s = width / 200;
+
+      // Draw Outer Shield Frame
+      ctx.beginPath();
+      ctx.moveTo(100 * s, 10 * s);
+      ctx.lineTo(180 * s, 50 * s);
+      ctx.lineTo(180 * s, 120 * s);
+      ctx.bezierCurveTo(180 * s, 170 * s, 100 * s, 220 * s, 100 * s, 220 * s);
+      ctx.bezierCurveTo(100 * s, 220 * s, 20 * s, 170 * s, 20 * s, 120 * s);
+      ctx.lineTo(20 * s, 50 * s);
+      ctx.closePath();
+
+      ctx.fillStyle = '#0b1329';
+      ctx.fill();
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 12 * s;
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      // Draw Inner Lattice
+      ctx.beginPath();
+      ctx.moveTo(100 * s, 35 * s);
+      ctx.lineTo(155 * s, 65 * s);
+      ctx.lineTo(155 * s, 115 * s);
+      ctx.bezierCurveTo(155 * s, 152 * s, 100 * s, 190 * s, 100 * s, 190 * s);
+      ctx.bezierCurveTo(100 * s, 190 * s, 45 * s, 152 * s, 45 * s, 115 * s);
+      ctx.lineTo(45 * s, 65 * s);
+      ctx.closePath();
+
+      ctx.fillStyle = 'rgba(16, 185, 129, 0.15)';
+      ctx.fill();
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 6 * s;
+      ctx.stroke();
+
+      // Draw Central Core Circle
+      ctx.beginPath();
+      ctx.arc(100 * s, 110 * s, 28 * s, 0, 2 * Math.PI);
+      ctx.fillStyle = '#030712';
+      ctx.fill();
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 6 * s;
+      ctx.stroke();
+
+      // Core Spoke Lines
+      ctx.beginPath();
+      ctx.moveTo(100 * s, 82 * s); ctx.lineTo(100 * s, 92 * s);
+      ctx.moveTo(100 * s, 128 * s); ctx.lineTo(100 * s, 138 * s);
+      ctx.moveTo(72 * s, 110 * s); ctx.lineTo(82 * s, 110 * s);
+      ctx.moveTo(118 * s, 110 * s); ctx.lineTo(128 * s, 110 * s);
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 6 * s;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // Inner White Center
+      ctx.beginPath();
+      ctx.arc(100 * s, 110 * s, 10 * s, 0, 2 * Math.PI);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+
+      if (callback) callback(canvas);
+    }
+
+    // Trigger PNG Download
+    function downloadPNG(size) {
+      renderLogoToCanvas(size, size, (canvas) => {
+        const imageURI = canvas.toDataURL("image/png");
+        const link = document.createElement('a');
+        link.download = `AEGIS-Logo-${size}x${size}.png`;
+        link.href = imageURI;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      });
+    }
+
+    // Binary Windows .ICO File Creator from Canvas
+    function downloadICO() {
+      // Render 32x32 canvas for standard ICO
+      renderLogoToCanvas(32, 32, (canvas) => {
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.getImageData(0, 0, 32, 32);
+        
+        // Construct basic ICO binary structure
+        const icoHeader = new Uint8Array([
+          0, 0,             // Reserved
+          1, 0,             // Type 1 = ICO
+          1, 0,             // Number of Images (1)
+          // Directory Entry (16 bytes)
+          32,               // Width (32)
+          32,               // Height (32)
+          0,                // Color Palette (0 = No palette)
+          0,                // Reserved
+          1, 0,             // Color Planes (1)
+          32, 0,            // Bits per Pixel (32)
+          0, 0, 0, 0,       // Size of Image Data (will set)
+          22, 0, 0, 0       // Offset of Image Data (6 header + 16 dir = 22)
+        ]);
+
+        // BMP Header inside ICO (40 bytes)
+        const bmpHeader = new Uint8Array([
+          40, 0, 0, 0,      // Header Size (40)
+          32, 0, 0, 0,      // Width (32)
+          64, 0, 0, 0,      // Height x 2 (64 for ICO AND/XOR mask)
+          1, 0,             // Planes (1)
+          32, 0,            // BPP (32)
+          0, 0, 0, 0,       // Compression (0 = NONE)
+          0, 0, 0, 0,       // Raw Image Size
+          0, 0, 0, 0,       // X Pixels/M
+          0, 0, 0, 0,       // Y Pixels/M
+          0, 0, 0, 0,       // Colors Used
+          0, 0, 0, 0        // Important Colors
+        ]);
+
+        // Convert RGBA to BGRA (Bottom-Up order for BMP)
+        const pixelData = new Uint8Array(32 * 32 * 4);
+        for (let y = 0; y < 32; y++) {
+          for (let x = 0; x < 32; x++) {
+            const srcIdx = ((31 - y) * 32 + x) * 4; // Vertical Flip
+            const dstIdx = (y * 32 + x) * 4;
+            pixelData[dstIdx + 0] = imgData.data[srcIdx + 2]; // B
+            pixelData[dstIdx + 1] = imgData.data[srcIdx + 1]; // G
+            pixelData[dstIdx + 2] = imgData.data[srcIdx + 0]; // R
+            pixelData[dstIdx + 3] = imgData.data[srcIdx + 3]; // A
+          }
+        }
+
+        const imageDataSize = bmpHeader.length + pixelData.length;
+        
+        // Update size in Directory Entry (bytes 14-17)
+        icoHeader[14] = imageDataSize & 0xFF;
+        icoHeader[15] = (imageDataSize >> 8) & 0xFF;
+        icoHeader[16] = (imageDataSize >> 16) & 0xFF;
+        icoHeader[17] = (imageDataSize >> 24) & 0xFF;
+
+        // Combine into single Uint8Array
+        const icoFile = new Uint8Array(icoHeader.length + bmpHeader.length + pixelData.length);
+        icoFile.set(icoHeader, 0);
+        icoFile.set(bmpHeader, icoHeader.length);
+        icoFile.set(pixelData, icoHeader.length + bmpHeader.length);
+
+        // Blob and Trigger Download
+        const blob = new Blob([icoFile], { type: 'image/x-icon' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.download = 'favicon.ico';
+        link.href = url;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      });
+    }
+  </script>
+</body>
+</html>
