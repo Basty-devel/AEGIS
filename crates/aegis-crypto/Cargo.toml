@@ -17,8 +17,12 @@ ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 elliptic-curve = { version = "0.14.1", features = ["ecdh"] }
 getrandom = "0.4.3"
 hkdf = "0.13.0"
-ml-dsa = "0.1.1"
-ml-kem = "0.3.2"
+# `zeroize` is NOT a default feature of either post-quantum crate; without
+# it `ml_dsa::SigningKey` and `ml_kem::DecapsulationKey` keep their secret
+# material in memory after drop. Spec Section 2 mandates zeroization, so
+# both features are enabled explicitly here.
+ml-dsa = { version = "0.1.1", features = ["zeroize"] }
+ml-kem = { version = "0.3.2", features = ["zeroize"] }
 sha2 = "0.11.0"
 signature = "3.0.0"
 subtle = "2.6.1"

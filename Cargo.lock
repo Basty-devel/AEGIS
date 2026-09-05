@@ -537,6 +537,7 @@ dependencies = [
  "pkcs8",
  "shake",
  "signature",
+ "zeroize",
 ]
 
 [[package]]
@@ -551,6 +552,7 @@ dependencies = [
  "pkcs8",
  "rand_core",
  "sha3",
+ "zeroize",
 ]
 
 [[package]]
@@ -562,6 +564,7 @@ dependencies = [
  "ctutils",
  "hybrid-array",
  "num-traits",
+ "zeroize",
 ]
 
 [[package]]

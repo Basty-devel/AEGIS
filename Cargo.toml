@@ -28,4 +28,14 @@ unsafe_code = "deny"
 # released — see vendor/hybrid-array-0.4.14/README.md and
 # https://github.com/RustCrypto/hybrid-array/issues/66. Delete this
 # patch and the vendor/ copy once a release covers size 513.
+#
+# BLAST RADIUS: `[patch.crates-io]` is workspace-wide and cannot be
+# scoped to one dependency. Although the only crate that *needs* the
+# patch is `bp512-nestler` (via `primeorder`), this replacement of
+# `hybrid-array` is also linked into `ml-kem`, `ml-dsa`, `aes-gcm`,
+# and `chacha20poly1305` — i.e. every primitive in `aegis-crypto`
+# except Argon2id, BLAKE3, and Ed25519 runs on the vendored copy, not
+# the crates.io release. The vendored tree has been diffed against
+# upstream 0.4.14 and differs only by that one table entry; re-run that
+# diff before ever bumping the vendored version.
 hybrid-array = { path = "vendor/hybrid-array-0.4.14" }
