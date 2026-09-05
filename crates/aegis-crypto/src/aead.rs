@@ -3,22 +3,67 @@
 //!
 //! Nonce construction: 32-bit random salt (generated once per
 //! session/file) concatenated with a 64-bit big-endian monotonic
-//! counter — unique by construction even under key reuse.
+//! counter. See [`ChunkNonceSequence`] for the exact uniqueness
+//! guarantee this does and does not provide.
 
 use aead::{Aead, KeyInit, Payload};
 use aes_gcm::Aes256Gcm;
 use chacha20poly1305::ChaCha20Poly1305;
 
-/// Produces unique 96-bit nonces for a single session or file key:
-/// a fixed 32-bit random salt followed by a 64-bit big-endian counter.
+/// Produces 96-bit nonces: a fixed 32-bit random salt followed by a
+/// 64-bit big-endian counter.
+///
+/// # Uniqueness guarantee — read this before reusing a key
+///
+/// Nonces are unique **within one sequence instance**, by construction:
+/// the counter is strictly monotonic and cannot wrap without panicking.
+///
+/// They are **not** unconditionally unique across instances. Two
+/// sequences built with the same salt emit exactly the same nonces, and
+/// two independently random salts collide with probability governed by
+/// the birthday bound on 32 bits — about 50% after roughly 77,000
+/// sequences. Under AES-GCM a repeated (key, nonce) pair is not a
+/// graceful degradation: it leaks the XOR of the two plaintexts and
+/// exposes the GHASH authentication key, which permits forgery. This is
+/// therefore safe only when each sequence gets a **fresh key**, which
+/// is the design intent — one key per session or per file, as in spec
+/// Section 2 — with the salt providing defence in depth rather than the
+/// primary guarantee.
+///
+/// Prefer [`ChunkNonceSequence::random`] over [`ChunkNonceSequence::new`]:
+/// `new` exists for deserializing a salt received on the wire or read
+/// from a file header, not for picking one.
 pub struct ChunkNonceSequence {
     salt: [u8; 4],
     counter: u64,
 }
 
 impl ChunkNonceSequence {
+    /// Build a sequence from an existing salt — one received from a
+    /// peer or read from a file header. To *choose* a salt, use
+    /// [`ChunkNonceSequence::random`].
     pub fn new(salt: [u8; 4]) -> Self {
         Self { salt, counter: 0 }
+    }
+
+    /// Build a sequence with a freshly sampled random salt.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system RNG fails. Deliberate
+    /// fail-closed behaviour: the condition is not attacker-controlled,
+    /// and a predictable salt combined with a reused key is exactly the
+    /// catastrophic case documented on this type.
+    pub fn random() -> Self {
+        let mut salt = [0u8; 4];
+        getrandom::fill(&mut salt).expect("OS RNG failure");
+        Self::new(salt)
+    }
+
+    /// The salt this sequence is using, to be transmitted alongside the
+    /// ciphertext so the receiver can reconstruct the same nonces.
+    pub fn salt(&self) -> [u8; 4] {
+        self.salt
     }
 
     /// Returns the next nonce in the sequence. Panics on counter
@@ -106,6 +151,36 @@ mod tests {
     }
 
     #[test]
+    fn random_sequences_start_at_counter_zero_and_carry_their_salt() {
+        let mut seq = ChunkNonceSequence::random();
+        let salt = seq.salt();
+        let first = seq.next();
+        assert_eq!(&first[..4], &salt[..]);
+        assert_eq!(&first[4..], &0u64.to_be_bytes());
+    }
+
+    /// Two independently seeded sequences must not be identical. This
+    /// is a smoke test that `random()` samples at all (a hardcoded salt
+    /// would fail it), not a statistical test of the RNG.
+    #[test]
+    fn random_sequences_differ_from_each_other() {
+        let salts: HashSet<[u8; 4]> = (0..64).map(|_| ChunkNonceSequence::random().salt()).collect();
+        assert!(
+            salts.len() > 1,
+            "random() must sample a fresh salt each time",
+        );
+    }
+
+    #[test]
+    fn a_sequence_rebuilt_from_a_transmitted_salt_reproduces_the_nonces() {
+        let mut sender = ChunkNonceSequence::random();
+        let mut receiver = ChunkNonceSequence::new(sender.salt());
+        for _ in 0..8 {
+            assert_eq!(sender.next(), receiver.next());
+        }
+    }
+
+    #[test]
     fn aes256gcm_round_trips() {
         let key = [0x42u8; 32];
         let nonce = [0x24u8; 12];
@@ -121,6 +196,47 @@ mod tests {
         let ct = encrypt(AeadAlgorithm::ChaCha20Poly1305, &key, &nonce, b"aad", b"hello aegis").unwrap();
         let pt = decrypt(AeadAlgorithm::ChaCha20Poly1305, &key, &nonce, b"aad", &ct).unwrap();
         assert_eq!(pt, b"hello aegis");
+    }
+
+    /// The AAD is authenticated but not encrypted, so nothing about the
+    /// ciphertext bytes changes when it does. Every other test in this
+    /// module passes the same AAD to encrypt and decrypt, so none of
+    /// them would notice if the AAD were dropped on the decrypt path
+    /// entirely. This one would.
+    #[test]
+    fn decrypting_with_a_different_aad_fails() {
+        let key = [0x42u8; 32];
+        let nonce = [0x24u8; 12];
+
+        for alg in [AeadAlgorithm::Aes256Gcm, AeadAlgorithm::ChaCha20Poly1305] {
+            let ct = encrypt(alg, &key, &nonce, b"context-a", b"hello aegis").unwrap();
+            assert!(
+                decrypt(alg, &key, &nonce, b"context-b", &ct).is_err(),
+                "{alg:?}: mismatched AAD must fail authentication",
+            );
+            // Absent AAD must fail too — otherwise an attacker could
+            // simply strip the binding rather than substitute it.
+            assert!(
+                decrypt(alg, &key, &nonce, b"", &ct).is_err(),
+                "{alg:?}: stripped AAD must fail authentication",
+            );
+            // Sanity: the matching AAD still works, so the assertions
+            // above are about the AAD and not a broken fixture.
+            assert_eq!(
+                decrypt(alg, &key, &nonce, b"context-a", &ct).unwrap(),
+                b"hello aegis",
+            );
+        }
+    }
+
+    /// The mirror case: AAD supplied at decrypt where none was
+    /// supplied at encrypt.
+    #[test]
+    fn decrypting_with_added_aad_fails_when_none_was_authenticated() {
+        let key = [0x42u8; 32];
+        let nonce = [0x24u8; 12];
+        let ct = encrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"", b"hello aegis").unwrap();
+        assert!(decrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"aad", &ct).is_err());
     }
 
     #[test]

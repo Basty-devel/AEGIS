@@ -102,10 +102,19 @@ pub fn ml_kem_encapsulate(
     let mut m = B32::default();
     getrandom::fill(m.as_mut_slice()).expect("OS RNG failure");
 
-    let (ciphertext, shared_secret) = ek.encapsulate_deterministic(&m);
+    let (ciphertext, mut shared_secret) = ek.encapsulate_deterministic(&m);
     m.as_mut_slice().zeroize();
 
-    Ok((ciphertext.to_vec(), Zeroizing::new(shared_secret.into())))
+    // Copied out and the original wiped explicitly. `ml-kem` returns the
+    // shared secret as a `hybrid_array::Array`, which only zeroizes on
+    // drop when hybrid-array's own `zeroize` feature happens to be
+    // enabled somewhere in the build graph — a Cargo feature-unification
+    // accident is not a basis for a security property.
+    let mut out = Zeroizing::new([0u8; ML_KEM_1024_SHARED_SECRET_LEN]);
+    out.copy_from_slice(shared_secret.as_slice());
+    shared_secret.as_mut_slice().zeroize();
+
+    Ok((ciphertext.to_vec(), out))
 }
 
 /// Decapsulate an ML-KEM-1024 ciphertext with `keypair`'s decapsulation
@@ -127,9 +136,12 @@ pub fn ml_kem_decapsulate(
             expected: ML_KEM_1024_CIPHERTEXT_LEN,
             actual: ciphertext.len(),
         })?;
-    Ok(Zeroizing::new(
-        keypair.decapsulation_key.decapsulate(&ct).into(),
-    ))
+    // Same explicit copy-and-wipe as `ml_kem_encapsulate`.
+    let mut shared_secret = keypair.decapsulation_key.decapsulate(&ct);
+    let mut out = Zeroizing::new([0u8; ML_KEM_1024_SHARED_SECRET_LEN]);
+    out.copy_from_slice(shared_secret.as_slice());
+    shared_secret.as_mut_slice().zeroize();
+    Ok(out)
 }
 
 #[cfg(test)]

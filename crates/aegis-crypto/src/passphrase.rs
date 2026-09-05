@@ -20,6 +20,51 @@ pub const PRODUCTION_PARAMS: Argon2Params = Argon2Params {
     parallelism: 4,
 };
 
+/// Derive a master key using the spec-mandated production parameters.
+///
+/// **This is the entry point production code must use.** It pins
+/// [`PRODUCTION_PARAMS`] so no caller — and no configuration toggle —
+/// can weaken the KDF, which is what spec Section 7A (Security by
+/// Default: no toggle may decrease these) requires. The general
+/// [`derive_master_key`] exists only so the RFC 9106 known-answer test
+/// can supply the RFC's deliberately weak parameters.
+///
+/// # Errors
+///
+/// Propagates `argon2::Error` for an invalid `salt` (RFC 9106 requires
+/// at least 8 bytes), an over-long `associated_data`, or an `output`
+/// length outside Argon2's permitted range.
+pub fn derive_master_key_production(
+    password: &[u8],
+    salt: &[u8],
+    secret: &[u8],
+    associated_data: &[u8],
+    output: &mut [u8],
+) -> Result<(), argon2::Error> {
+    derive_master_key(
+        password,
+        salt,
+        secret,
+        associated_data,
+        &PRODUCTION_PARAMS,
+        output,
+    )
+}
+
+/// Derive a master key with caller-supplied Argon2id parameters.
+///
+/// **Not for production use — call [`derive_master_key_production`]
+/// instead.** This form exists solely so the RFC 9106 known-answer test
+/// can pass the RFC's weak vector parameters (32 KiB, t=3). Any
+/// production caller that reaches for this can silently weaken the
+/// passphrase KDF, which spec Section 7A forbids.
+///
+/// # Errors
+///
+/// Propagates `argon2::Error` for parameters outside Argon2's permitted
+/// ranges, an invalid `salt`, an over-long `associated_data`, or an
+/// unsupported `output` length.
+#[doc(hidden)]
 pub fn derive_master_key(
     password: &[u8],
     salt: &[u8],
@@ -57,6 +102,53 @@ mod tests {
         assert_eq!(PRODUCTION_PARAMS.memory_kib, 64 * 1024);
         assert_eq!(PRODUCTION_PARAMS.iterations, 4);
         assert_eq!(PRODUCTION_PARAMS.parallelism, 4);
+    }
+
+    /// The production entry point must pin the spec parameters — not
+    /// merely default to them.
+    #[test]
+    fn production_entry_point_uses_the_spec_parameters() {
+        let mut via_production = [0u8; 32];
+        derive_master_key_production(
+            b"correct horse battery staple",
+            b"somesalt12345678",
+            b"",
+            b"",
+            &mut via_production,
+        )
+        .unwrap();
+
+        let mut via_explicit_params = [0u8; 32];
+        derive_master_key(
+            b"correct horse battery staple",
+            b"somesalt12345678",
+            b"",
+            b"",
+            &PRODUCTION_PARAMS,
+            &mut via_explicit_params,
+        )
+        .unwrap();
+
+        assert_eq!(via_production, via_explicit_params);
+
+        // And is genuinely stronger than the weak KAT parameters, so a
+        // future edit that silently downgrades PRODUCTION_PARAMS to the
+        // test values would be caught here too.
+        let mut via_weak_params = [0u8; 32];
+        derive_master_key(
+            b"correct horse battery staple",
+            b"somesalt12345678",
+            b"",
+            b"",
+            &Argon2Params {
+                memory_kib: 32,
+                iterations: 3,
+                parallelism: 4,
+            },
+            &mut via_weak_params,
+        )
+        .unwrap();
+        assert_ne!(via_production, via_weak_params);
     }
 
     #[test]
