@@ -155,13 +155,13 @@ dependencies = [
 
 [[package]]
 name = "bp512-nestler"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a368ec15c682ce6f71b9dc577b732cc17c1612e9011e5d1e7ad07993f5a86cf"
+checksum = "0fbdb3ffce3c1a4e3eb51b0b85561355d877af462b313ab7d49d7db0a83e8efe"
 dependencies = [
  "elliptic-curve",
+ "nestler-primeorder",
  "primefield",
- "primeorder",
 ]
 
 [[package]]
@@ -469,10 +469,10 @@ dependencies = [
 [[package]]
 name = "hybrid-array"
 version = "0.4.14"
-source = "git+https://github.com/Basty-devel/nestler-hybrid-array?branch=master#7be8b68ffaa0ec315c3cf444c8d18a85d55124d7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
 dependencies = [
  "ctutils",
- "seq-macro",
  "subtle",
  "typenum",
  "zeroize",
@@ -570,6 +570,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "nestler-hybrid-array"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "959c6b68bdf5a84baafcbaa84e1f409bf3004a280d04ae3344f453267f49d9ec"
+dependencies = [
+ "seq-macro",
+ "typenum",
+]
+
+[[package]]
+name = "nestler-primeorder"
+version = "0.14.0-rc.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "195a93b80d382836f11b4c9548df320281a6904e0840d9f5add4f9afd6228f4f"
+dependencies = [
+ "elliptic-curve",
+ "nestler-wnaf",
+ "once_cell",
+ "primefield",
+ "serdect",
+]
+
+[[package]]
+name = "nestler-wnaf"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf50ccb4e55227f417c7da1dee00c05bf47092ccb5f61d84f1c1661088039d02"
+dependencies = [
+ "ff",
+ "group",
+ "nestler-hybrid-array",
+ "primefield",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -648,19 +683,6 @@ dependencies = [
  "rand_core",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "primeorder"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06"
-dependencies = [
- "elliptic-curve",
- "once_cell",
- "primefield",
- "serdect",
- "wnaf",
 ]
 
 [[package]]
@@ -893,18 +915,6 @@ checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
 dependencies = [
  "crypto-common",
  "ctutils",
-]
-
-[[package]]
-name = "wnaf"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
-dependencies = [
- "ff",
- "group",
- "hybrid-array",
- "primefield",
 ]
 
 [[package]]
