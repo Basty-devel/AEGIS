@@ -21,35 +21,14 @@ repository = "https://github.com/Basty-devel/AEGIS"
 # narrowly scoped `#[allow(unsafe_code)]` at the point of use.
 unsafe_code = "deny"
 
-[patch.crates-io]
-# `nestler-hybrid-array` (github.com/Basty-devel/nestler-hybrid-array) is
-# an independently-authored, from-scratch replacement for hybrid-array,
-# built directly from its public API contract rather than its source —
-# not a fork. It exists because `primeorder::PrimeCurveParams` (needed by
-# bp512-nestler, for brainpoolP512r1) requires an array size (513) that
-# was missing from every released hybrid-array version at the time, and
-# because a `[patch.crates-io]` entry — the only way to add that size
-# locally — never travels with a crate's own `cargo publish`
-# verification build, so `aegis-crypto` could never be published to
-# crates.io while patching the *real* hybrid-array this way regardless.
-# See that repo's README for the full rationale and scope.
-#
-# Verified against this exact workspace: `cargo build --workspace` and
-# `cargo test --workspace` (73 tests, including the ML-KEM-1024 and
-# ML-DSA-87 ACVP vectors) both pass with this patch in place.
-#
-# BLAST RADIUS: `[patch.crates-io]` is workspace-wide and cannot be
-# scoped to one dependency. Although the only crate that *needs* the
-# size-513 fix is `bp512-nestler` (via `primeorder`), this replacement of
-# `hybrid-array` is also linked into `sha2`, `sha3`, `ml-kem`, `ml-dsa`,
-# `aes-gcm`, and `chacha20poly1305` — i.e. every primitive in
-# `aegis-crypto` except Argon2id, BLAKE3, and Ed25519 runs on
-# `nestler-hybrid-array`, not the crates.io release of `hybrid-array`.
-#
-# NOTE: this patch has the same fundamental limitation as the vendored
-# one it replaces — it is workspace-local and will not carry over to a
-# published crate's own verification build. `cargo publish -p
-# aegis-crypto` remains blocked until upstream hybrid-array ships a
-# release covering size 513 (https://github.com/RustCrypto/hybrid-array/
-# pull/233, merged 2026-08-11, not yet in a release as of 0.4.14).
-hybrid-array = { git = "https://github.com/Basty-devel/nestler-hybrid-array", branch = "master" }
+# No [patch.crates-io] section: bp512-nestler >=0.2.0 depends on
+# nestler-primeorder -> nestler-wnaf -> nestler-hybrid-array (real,
+# published crates.io dependencies, each a minimal fork/replacement one
+# link up the chain) instead of a patched hybrid-array, so aegis-crypto
+# no longer needs a workspace-local patch to build against a version of
+# hybrid-array that covers array size 513. See bp512-nestler's README
+# for the full chain and rationale. This is also what unblocks
+# `cargo publish -p aegis-crypto`: a [patch.crates-io] entry never
+# travels with a published crate's own verification build, so as long
+# as one existed anywhere in this workspace, publishing was impossible
+# regardless of what the patch pointed at.
