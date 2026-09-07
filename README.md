@@ -199,3 +199,5 @@ Explicitly deferred or rejected design goals, so scope creep and audit expectati
 ## License
 
 License to be finalized before first tagged release. Until a `LICENSE` file is present in this repository, no rights are granted to use, copy, modify, or distribute this code beyond viewing the source.
+
+## Copyright 2026 by nestler.dev
