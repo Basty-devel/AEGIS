@@ -1,9 +1,13 @@
 [package]
 name = "aegis-crypto"
-version.workspace = true
+# Overrides workspace.package's version rather than inheriting it: this
+# bump (README/LICENSE only, no code change) is specific to this crate,
+# and the other workspace members aren't published yet.
+version = "0.1.1"
 edition.workspace = true
 description = "Hybrid post-quantum cryptographic primitives (ML-KEM-1024, ML-DSA-87, brainpoolP512r1, AEAD, Argon2id) for the AegisPQC messenger. NOT independently audited."
 license = "PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
 repository.workspace = true
 
 [lints]
