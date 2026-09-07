@@ -59,9 +59,8 @@ pub fn derive_key(
     pubkey_b: &[u8],
     output: &mut [u8],
 ) -> Result<(), CryptoError> {
-    let mut info = Vec::with_capacity(
-        2 + domain_label.len() + 1 + 2 + pubkey_a.len() + 2 + pubkey_b.len(),
-    );
+    let mut info =
+        Vec::with_capacity(2 + domain_label.len() + 1 + 2 + pubkey_a.len() + 2 + pubkey_b.len());
     push_framed(&mut info, "domain_label", domain_label)?;
     info.push(protocol_version);
     push_framed(&mut info, "pubkey_a", pubkey_a)?;

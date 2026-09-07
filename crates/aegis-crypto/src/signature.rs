@@ -3,8 +3,14 @@
 //! if BOTH the Ed25519 and ML-DSA-87 components verify — this is what
 //! "ML-DSA-87 paired with Ed25519" means in the spec.
 
-use ed25519_dalek::{Signer as _, SigningKey as Ed25519SigningKey, Verifier as _, VerifyingKey as Ed25519VerifyingKey};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa87, SigningKey as MlDsa87SigningKey, VerifyingKey as MlDsa87VerifyingKey};
+use ed25519_dalek::{
+    Signer as _, SigningKey as Ed25519SigningKey, Verifier as _,
+    VerifyingKey as Ed25519VerifyingKey,
+};
+use ml_dsa::{
+    EncodedSignature, EncodedVerifyingKey, MlDsa87, SigningKey as MlDsa87SigningKey,
+    VerifyingKey as MlDsa87VerifyingKey,
+};
 use signature::Keypair;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -141,7 +147,8 @@ pub fn verify_dual(
         .ok()
         .and_then(|encoded_vk| {
             let vk = MlDsa87VerifyingKey::decode(&encoded_vk);
-            let encoded_sig = EncodedSignature::<MlDsa87>::try_from(sig.ml_dsa87.as_slice()).ok()?;
+            let encoded_sig =
+                EncodedSignature::<MlDsa87>::try_from(sig.ml_dsa87.as_slice()).ok()?;
             let signature = ml_dsa::Signature::<MlDsa87>::decode(&encoded_sig)?;
             vk.verify(message, &signature).ok()
         })

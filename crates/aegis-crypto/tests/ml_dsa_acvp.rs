@@ -201,8 +201,13 @@ fn acvp_ml_dsa_87_sig_ver_all_vectors() {
         "expected the full ACVP sigVer group, not a subset",
     );
 
-    let pk_bytes =
-        hex::decode(group.pk.as_ref().expect("sigVer groups carry a group-level pk")).unwrap();
+    let pk_bytes = hex::decode(
+        group
+            .pk
+            .as_ref()
+            .expect("sigVer groups carry a group-level pk"),
+    )
+    .unwrap();
     let encoded_vk = EncodedVerifyingKey::<MlDsa87>::try_from(pk_bytes.as_slice()).unwrap();
     let vk = VerifyingKey::<MlDsa87>::decode(&encoded_vk);
 

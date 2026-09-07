@@ -183,10 +183,24 @@ mod tests {
         };
         let mut out1 = [0u8; 32];
         let mut out2 = [0u8; 32];
-        derive_master_key(b"password", b"somesalt12345678", b"", b"", &params, &mut out1)
-            .unwrap();
-        derive_master_key(b"password", b"somesalt12345678", b"", b"", &params, &mut out2)
-            .unwrap();
+        derive_master_key(
+            b"password",
+            b"somesalt12345678",
+            b"",
+            b"",
+            &params,
+            &mut out1,
+        )
+        .unwrap();
+        derive_master_key(
+            b"password",
+            b"somesalt12345678",
+            b"",
+            b"",
+            &params,
+            &mut out2,
+        )
+        .unwrap();
         assert_eq!(out1, out2);
     }
 
@@ -204,14 +218,20 @@ mod tests {
             iterations: 3,
             parallelism: 4,
         };
-        let expected_tag = hex::decode(
-            "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659",
-        )
-        .unwrap();
+        let expected_tag =
+            hex::decode("0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659")
+                .unwrap();
 
         let mut out = vec![0u8; 32];
-        derive_master_key(&password, &salt, &secret, &associated_data, &params, &mut out)
-            .unwrap();
+        derive_master_key(
+            &password,
+            &salt,
+            &secret,
+            &associated_data,
+            &params,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(out, expected_tag);
     }
 }

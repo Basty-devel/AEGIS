@@ -21,8 +21,8 @@
                       // vectors are still the authoritative KAT source.
 
 use ml_kem::{
-    array::Array, Ciphertext, Decapsulate, DecapsulationKey, EncapsulationKey,
-    ExpandedKeyEncoding, FromSeed, Key, KeyExport, MlKem1024,
+    array::Array, Ciphertext, Decapsulate, DecapsulationKey, EncapsulationKey, ExpandedKeyEncoding,
+    FromSeed, Key, KeyExport, MlKem1024,
 };
 use serde::Deserialize;
 use std::fs;
@@ -76,8 +76,8 @@ struct EncapDecapCase {
 }
 
 fn load<T: serde::de::DeserializeOwned>(path: &str) -> TestVectorFile<T> {
-    let json = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("fixture {path} must be readable: {e}"));
+    let json =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture {path} must be readable: {e}"));
     serde_json::from_str(&json).unwrap_or_else(|e| panic!("fixture {path} must parse: {e}"))
 }
 
@@ -130,7 +130,9 @@ fn acvp_ml_kem_1024_encapsulate_all_vectors() {
         .test_groups
         .iter()
         .find(|g| {
-            g.parameter_set == "ML-KEM-1024" && g.function == "encapsulation" && g.test_type == "AFT"
+            g.parameter_set == "ML-KEM-1024"
+                && g.function == "encapsulation"
+                && g.test_type == "AFT"
         })
         .expect("fixture file has an ML-KEM-1024 AFT encapsulation group");
 
@@ -175,7 +177,9 @@ fn acvp_ml_kem_1024_decapsulate_all_vectors() {
         .test_groups
         .iter()
         .find(|g| {
-            g.parameter_set == "ML-KEM-1024" && g.function == "decapsulation" && g.test_type == "VAL"
+            g.parameter_set == "ML-KEM-1024"
+                && g.function == "decapsulation"
+                && g.test_type == "VAL"
         })
         .expect("fixture file has an ML-KEM-1024 VAL decapsulation group");
 

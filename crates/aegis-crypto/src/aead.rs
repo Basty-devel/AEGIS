@@ -69,7 +69,12 @@ impl ChunkNonceSequence {
     /// Returns the next nonce in the sequence. Panics on counter
     /// overflow (2^64 chunks under one key is not a realistic limit
     /// for this protocol's message/file sizes).
-    pub fn next(&mut self) -> [u8; 12] {
+    ///
+    /// Named `next_nonce` rather than `next`: this type does not
+    /// implement `Iterator` (there is no natural `Item`/end condition
+    /// for an infinite nonce stream), so a bare `next` would be
+    /// mistaken for one.
+    pub fn next_nonce(&mut self) -> [u8; 12] {
         let mut nonce = [0u8; 12];
         nonce[..4].copy_from_slice(&self.salt);
         nonce[4..].copy_from_slice(&self.counter.to_be_bytes());
@@ -180,15 +185,15 @@ mod tests {
         let mut seq = ChunkNonceSequence::new([0xAA, 0xBB, 0xCC, 0xDD]);
         let mut seen = HashSet::new();
         for _ in 0..10_000 {
-            assert!(seen.insert(seq.next()));
+            assert!(seen.insert(seq.next_nonce()));
         }
     }
 
     #[test]
     fn nonce_sequence_embeds_salt_and_increments_counter() {
         let mut seq = ChunkNonceSequence::new([1, 2, 3, 4]);
-        let n0 = seq.next();
-        let n1 = seq.next();
+        let n0 = seq.next_nonce();
+        let n1 = seq.next_nonce();
         assert_eq!(&n0[..4], &[1, 2, 3, 4]);
         assert_eq!(&n1[..4], &[1, 2, 3, 4]);
         assert_eq!(&n0[4..], &0u64.to_be_bytes());
@@ -199,7 +204,7 @@ mod tests {
     fn random_sequences_start_at_counter_zero_and_carry_their_salt() {
         let mut seq = ChunkNonceSequence::random();
         let salt = seq.salt();
-        let first = seq.next();
+        let first = seq.next_nonce();
         assert_eq!(&first[..4], &salt[..]);
         assert_eq!(&first[4..], &0u64.to_be_bytes());
     }
@@ -209,7 +214,9 @@ mod tests {
     /// would fail it), not a statistical test of the RNG.
     #[test]
     fn random_sequences_differ_from_each_other() {
-        let salts: HashSet<[u8; 4]> = (0..64).map(|_| ChunkNonceSequence::random().salt()).collect();
+        let salts: HashSet<[u8; 4]> = (0..64)
+            .map(|_| ChunkNonceSequence::random().salt())
+            .collect();
         assert!(
             salts.len() > 1,
             "random() must sample a fresh salt each time",
@@ -221,7 +228,7 @@ mod tests {
         let mut sender = ChunkNonceSequence::random();
         let mut receiver = ChunkNonceSequence::new(sender.salt());
         for _ in 0..8 {
-            assert_eq!(sender.next(), receiver.next());
+            assert_eq!(sender.next_nonce(), receiver.next_nonce());
         }
     }
 
@@ -229,7 +236,14 @@ mod tests {
     fn aes256gcm_round_trips() {
         let key = [0x42u8; 32];
         let nonce = [0x24u8; 12];
-        let ct = encrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"aad", b"hello aegis").unwrap();
+        let ct = encrypt(
+            AeadAlgorithm::Aes256Gcm,
+            &key,
+            &nonce,
+            b"aad",
+            b"hello aegis",
+        )
+        .unwrap();
         let pt = decrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"aad", &ct).unwrap();
         assert_eq!(pt, b"hello aegis");
     }
@@ -238,7 +252,14 @@ mod tests {
     fn chacha20poly1305_round_trips() {
         let key = [0x42u8; 32];
         let nonce = [0x24u8; 12];
-        let ct = encrypt(AeadAlgorithm::ChaCha20Poly1305, &key, &nonce, b"aad", b"hello aegis").unwrap();
+        let ct = encrypt(
+            AeadAlgorithm::ChaCha20Poly1305,
+            &key,
+            &nonce,
+            b"aad",
+            b"hello aegis",
+        )
+        .unwrap();
         let pt = decrypt(AeadAlgorithm::ChaCha20Poly1305, &key, &nonce, b"aad", &ct).unwrap();
         assert_eq!(pt, b"hello aegis");
     }
@@ -288,7 +309,14 @@ mod tests {
     fn tampered_ciphertext_fails_to_decrypt() {
         let key = [0x42u8; 32];
         let nonce = [0x24u8; 12];
-        let mut ct = encrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"aad", b"hello aegis").unwrap();
+        let mut ct = encrypt(
+            AeadAlgorithm::Aes256Gcm,
+            &key,
+            &nonce,
+            b"aad",
+            b"hello aegis",
+        )
+        .unwrap();
         let last = ct.len() - 1;
         ct[last] ^= 0xFF;
         assert!(decrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"aad", &ct).is_err());
@@ -311,7 +339,10 @@ mod tests {
         let expected_tag = hex::decode("bdc1ac884d332457a1d2664f168c76f0").unwrap();
 
         let ct = encrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"", b"").unwrap();
-        assert_eq!(ct, expected_tag, "ciphertext for empty plaintext is just the 16-byte tag");
+        assert_eq!(
+            ct, expected_tag,
+            "ciphertext for empty plaintext is just the 16-byte tag"
+        );
     }
 
     /// RFC 8439 Section 2.8.2 worked example — the canonical
@@ -320,12 +351,11 @@ mod tests {
     /// per spec Section 9.1.
     #[test]
     fn chacha20poly1305_official_kat_rfc8439() {
-        let key: [u8; 32] = hex::decode(
-            "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
-        )
-        .unwrap()[..32]
-            .try_into()
-            .unwrap();
+        let key: [u8; 32] =
+            hex::decode("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+                .unwrap()[..32]
+                .try_into()
+                .unwrap();
         let nonce: [u8; 12] = hex::decode("070000004041424344454647").unwrap()[..12]
             .try_into()
             .unwrap();

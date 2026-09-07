@@ -50,7 +50,10 @@ mod tests {
 
     #[test]
     fn same_transcript_gives_same_digest() {
-        assert_eq!(sas_digest(b"alice-pub||bob-pub"), sas_digest(b"alice-pub||bob-pub"));
+        assert_eq!(
+            sas_digest(b"alice-pub||bob-pub"),
+            sas_digest(b"alice-pub||bob-pub")
+        );
     }
 
     /// The whole point of I4: a SAS digest must not be the same value
@@ -87,7 +90,10 @@ mod tests {
 
     #[test]
     fn different_transcript_gives_different_digest() {
-        assert_ne!(sas_digest(b"alice-pub||bob-pub"), sas_digest(b"bob-pub||alice-pub"));
+        assert_ne!(
+            sas_digest(b"alice-pub||bob-pub"),
+            sas_digest(b"bob-pub||alice-pub")
+        );
     }
 
     #[test]

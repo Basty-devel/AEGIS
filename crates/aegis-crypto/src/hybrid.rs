@@ -254,8 +254,7 @@ mod tests {
         let ml_kem = MlKem1024KeyPair::generate();
         let public = keys_for(&brainpool, &ml_kem);
 
-        let (ciphertext_v1, key_v1) =
-            hybrid_kem_encapsulate(ProtocolVersion::V1, &public).unwrap();
+        let (ciphertext_v1, key_v1) = hybrid_kem_encapsulate(ProtocolVersion::V1, &public).unwrap();
         let key_v1_decap = hybrid_kem_decapsulate(
             ProtocolVersion::V1,
             &brainpool,
@@ -366,7 +365,9 @@ mod tests {
             ml_kem1024_ek: vec![0u8; 3],
         };
         assert_eq!(
-            hybrid_kem_encapsulate(ProtocolVersion::V1, &bad_ek).err().unwrap(),
+            hybrid_kem_encapsulate(ProtocolVersion::V1, &bad_ek)
+                .err()
+                .unwrap(),
             CryptoError::InvalidEncapsulationKeyLength {
                 expected: crate::kem::ML_KEM_1024_ENCAPSULATION_KEY_LEN,
                 actual: 3,
