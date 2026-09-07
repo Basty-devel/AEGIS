@@ -11,19 +11,18 @@
 //! and the only primitive here not backed by a mainline RustCrypto
 //! implementation. Specifically:
 //!
-//! - Version **0.1.2**, a pre-1.0 single-author crate with no
+//! - Version **0.2.0**, a pre-1.0 single-author crate with no
 //!   third-party cryptographic audit.
-//! - Licensed **PolyForm-Noncommercial-1.0.0**, which is an unresolved
-//!   tension with AEGIS's own (as yet undecided) license — a
-//!   noncommercial-only dependency constrains what AEGIS itself can be
-//!   licensed as. Flagged for the licensing decision, not settled here.
+//! - Licensed **PolyForm-Noncommercial-1.0.0** — the same license
+//!   `aegis-crypto` itself now uses, so there is no licensing tension.
 //! - Published under the **same GitHub organisation as AEGIS itself**,
 //!   so it does not represent independent third-party review the way
 //!   the RustCrypto dependencies do.
-//! - It requires a workspace-level `[patch.crates-io]` override of
-//!   `hybrid-array`. That patch is not scoped to this module: it also
-//!   applies to `ml-kem`, `ml-dsa`, `aes-gcm`, and
-//!   `chacha20poly1305`, all of which depend on `hybrid-array`.
+//! - No `[patch.crates-io]` override is needed: `bp512-nestler` 0.2.0
+//!   depends on real, published `nestler-primeorder` /
+//!   `nestler-wnaf` / `nestler-hybrid-array` crates rather than a
+//!   patched `hybrid-array`, so this dependency no longer forces a
+//!   workspace-wide patch the way earlier versions did.
 //!
 //! The mitigation in this module is the RFC 7027 Appendix A.3
 //! known-answer test below, which pins the curve arithmetic to
@@ -78,6 +77,9 @@ impl Brainpool512SecretKey {
         }
     }
 
+    /// The SEC1-encoded public key corresponding to this private
+    /// scalar, to be transmitted to the peer for
+    /// [`brainpool512_diffie_hellman`].
     pub fn public_key_bytes(&self) -> Vec<u8> {
         self.0.public_key().to_sec1_bytes().to_vec()
     }
@@ -96,6 +98,19 @@ impl Brainpool512SecretKey {
 /// the caller drops it — `elliptic_curve::ecdh::SharedSecret` zeroizes
 /// itself, and copying its bytes out into a bare array would defeat
 /// that.
+///
+/// # Examples
+///
+/// ```
+/// use aegis_crypto::ecdh::{brainpool512_diffie_hellman, Brainpool512SecretKey};
+///
+/// let alice = Brainpool512SecretKey::generate();
+/// let bob = Brainpool512SecretKey::generate();
+///
+/// let alice_shared = brainpool512_diffie_hellman(&alice, &bob.public_key_bytes()).unwrap();
+/// let bob_shared = brainpool512_diffie_hellman(&bob, &alice.public_key_bytes()).unwrap();
+/// assert_eq!(*alice_shared, *bob_shared);
+/// ```
 pub fn brainpool512_diffie_hellman(
     secret: &Brainpool512SecretKey,
     peer_public_bytes: &[u8],

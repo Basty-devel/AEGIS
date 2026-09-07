@@ -40,6 +40,8 @@
 //! The only panics are fail-closed reactions to operating-system RNG
 //! failure, documented at each site; see [`error`] for the reasoning.
 
+#![warn(missing_docs)]
+
 /// AegisPQC cryptographic primitives are NOT independently audited.
 /// Do not rely on this code for life-critical communications until a
 /// third-party cryptographic audit has been completed. See

@@ -81,12 +81,45 @@ impl ChunkNonceSequence {
     }
 }
 
+/// Which AEAD cipher [`encrypt`]/[`decrypt`] should use.
+///
+/// Both variants take a 256-bit key and a 96-bit nonce and produce a
+/// ciphertext with a 16-byte authentication tag appended, per spec
+/// Section 2. Neither variant is a default recommendation over the
+/// other here — the caller (protocol layer) picks based on the
+/// negotiated cipher suite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AeadAlgorithm {
+    /// AES-256-GCM (NIST SP 800-38D).
     Aes256Gcm,
+    /// ChaCha20-Poly1305 (RFC 8439).
     ChaCha20Poly1305,
 }
 
+/// Encrypt `plaintext` under `key`/`nonce`, authenticating `aad`.
+///
+/// `aad` is authenticated but not encrypted — it must be supplied
+/// identically to [`decrypt`] or authentication fails. The nonce must
+/// never repeat under the same key; see [`ChunkNonceSequence`] for
+/// this crate's nonce construction.
+///
+/// # Errors
+///
+/// Returns `Err` if the underlying cipher rejects the inputs (this
+/// wrapper does not add its own failure modes beyond what `aes-gcm`/
+/// `chacha20poly1305` can return).
+///
+/// # Examples
+///
+/// ```
+/// use aegis_crypto::aead::{decrypt, encrypt, AeadAlgorithm};
+///
+/// let key = [0x42u8; 32];
+/// let nonce = [0x24u8; 12];
+/// let ciphertext = encrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"aad", b"hello aegis").unwrap();
+/// let plaintext = decrypt(AeadAlgorithm::Aes256Gcm, &key, &nonce, b"aad", &ciphertext).unwrap();
+/// assert_eq!(plaintext, b"hello aegis");
+/// ```
 pub fn encrypt(
     alg: AeadAlgorithm,
     key: &[u8; 32],
@@ -106,6 +139,18 @@ pub fn encrypt(
     }
 }
 
+/// Decrypt and authenticate `ciphertext` under `key`/`nonce`/`aad`.
+///
+/// `aad` must match exactly what was passed to [`encrypt`]; a mismatch
+/// — including an empty `aad` where a non-empty one was used, or vice
+/// versa — is treated the same as tampered ciphertext.
+///
+/// # Errors
+///
+/// Returns `Err` if authentication fails (tampered ciphertext, wrong
+/// key/nonce/AAD) or the underlying cipher otherwise rejects the
+/// inputs. Callers must not attempt to use or inspect the output on
+/// `Err` — the AEAD contract makes no promises about it.
 pub fn decrypt(
     alg: AeadAlgorithm,
     key: &[u8; 32],

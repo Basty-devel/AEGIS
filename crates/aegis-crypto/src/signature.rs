@@ -35,7 +35,9 @@ pub struct DualKeyPair {
 /// A dual signature. Contains no secret material — signatures are
 /// public values — so it is deliberately not zeroized.
 pub struct DualSignature {
+    /// The Ed25519 signature component.
     pub ed25519: [u8; 64],
+    /// The FIPS 204 encoded ML-DSA-87 signature component.
     pub ml_dsa87: Vec<u8>,
 }
 
@@ -71,14 +73,20 @@ impl DualKeyPair {
         Self { ed25519, ml_dsa87 }
     }
 
+    /// The Ed25519 verifying (public) key for this identity.
     pub fn ed25519_public_bytes(&self) -> [u8; 32] {
         self.ed25519.verifying_key().to_bytes()
     }
 
+    /// The FIPS 204 encoded ML-DSA-87 verifying (public) key for this
+    /// identity.
     pub fn ml_dsa87_public_bytes(&self) -> Vec<u8> {
         self.ml_dsa87.verifying_key().encode().to_vec()
     }
 
+    /// Sign `message` with both component keys, producing a
+    /// [`DualSignature`] that [`verify_dual`] requires to pass on both
+    /// components.
     pub fn sign(&self, message: &[u8]) -> DualSignature {
         let ed25519 = self.ed25519.sign(message).to_bytes();
         let ml_dsa87 = self.ml_dsa87.sign(message).encode().to_vec();
@@ -86,6 +94,30 @@ impl DualKeyPair {
     }
 }
 
+/// Verify a [`DualSignature`] over `message` against the given public
+/// keys. Returns `true` only if **both** the Ed25519 and ML-DSA-87
+/// components verify — a signature valid under only one component is
+/// rejected, per this crate's dual-signature security model.
+///
+/// Malformed `ed25519_pub`, `ml_dsa87_pub`, or `sig` bytes are treated
+/// as verification failure (`false`), never a panic — all three can
+/// arrive from an untrusted peer.
+///
+/// # Examples
+///
+/// ```
+/// use aegis_crypto::signature::{verify_dual, DualKeyPair};
+///
+/// let keypair = DualKeyPair::generate();
+/// let signature = keypair.sign(b"hello aegis");
+/// let valid = verify_dual(
+///     &keypair.ed25519_public_bytes(),
+///     &keypair.ml_dsa87_public_bytes(),
+///     b"hello aegis",
+///     &signature,
+/// );
+/// assert!(valid);
+/// ```
 pub fn verify_dual(
     ed25519_pub: &[u8; 32],
     ml_dsa87_pub: &[u8],

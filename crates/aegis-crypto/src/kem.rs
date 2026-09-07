@@ -63,6 +63,9 @@ impl MlKem1024KeyPair {
         }
     }
 
+    /// The FIPS 203 encoded encapsulation (public) key corresponding
+    /// to this keypair, to be published to peers for
+    /// [`ml_kem_encapsulate`].
     pub fn encapsulation_key_bytes(&self) -> Vec<u8> {
         self.encapsulation_key.to_bytes().to_vec()
     }
@@ -86,6 +89,18 @@ impl MlKem1024KeyPair {
 /// encapsulation randomness `m`. Deliberate fail-closed behaviour: `m`
 /// fully determines the shared secret, so proceeding without real
 /// entropy would silently produce a predictable key.
+///
+/// # Examples
+///
+/// ```
+/// use aegis_crypto::kem::{ml_kem_decapsulate, ml_kem_encapsulate, MlKem1024KeyPair};
+///
+/// let keypair = MlKem1024KeyPair::generate();
+/// let (ciphertext, sender_secret) =
+///     ml_kem_encapsulate(&keypair.encapsulation_key_bytes()).unwrap();
+/// let receiver_secret = ml_kem_decapsulate(&keypair, &ciphertext).unwrap();
+/// assert_eq!(*sender_secret, *receiver_secret);
+/// ```
 pub fn ml_kem_encapsulate(
     encapsulation_key_bytes: &[u8],
 ) -> Result<(Vec<u8>, Zeroizing<[u8; ML_KEM_1024_SHARED_SECRET_LEN]>), CryptoError> {

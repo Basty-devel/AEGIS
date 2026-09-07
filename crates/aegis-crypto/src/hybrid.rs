@@ -25,13 +25,24 @@ pub const HYBRID_KEY_LEN: usize = 32;
 /// callers cannot accidentally leave it in memory after use.
 pub type HybridSharedKey = Zeroizing<[u8; HYBRID_KEY_LEN]>;
 
+/// The long-term public keys a peer needs in order to
+/// [`hybrid_kem_encapsulate`] to us.
 pub struct HybridPublicKeys {
+    /// SEC1-encoded brainpoolP512r1 public key
+    /// ([`crate::ecdh::Brainpool512SecretKey::public_key_bytes`]).
     pub brainpool512: Vec<u8>,
+    /// ML-KEM-1024 encapsulation key
+    /// ([`crate::kem::MlKem1024KeyPair::encapsulation_key_bytes`]).
     pub ml_kem1024_ek: Vec<u8>,
 }
 
+/// The wire bundle produced by [`hybrid_kem_encapsulate`] and consumed
+/// by [`hybrid_kem_decapsulate`].
 pub struct HybridCiphertext {
+    /// The sender's fresh, single-use brainpoolP512r1 public key for
+    /// this exchange.
     pub brainpool512_ephemeral_public: Vec<u8>,
+    /// The ML-KEM-1024 ciphertext.
     pub ml_kem1024_ciphertext: Vec<u8>,
 }
 
@@ -57,6 +68,34 @@ pub struct HybridCiphertext {
 /// [`Brainpool512SecretKey::generate`] and
 /// [`crate::kem::ml_kem_encapsulate`] for why that is fail-closed
 /// rather than an error return.
+///
+/// # Examples
+///
+/// ```
+/// use aegis_crypto::ecdh::Brainpool512SecretKey;
+/// use aegis_crypto::hybrid::{hybrid_kem_decapsulate, hybrid_kem_encapsulate, HybridPublicKeys};
+/// use aegis_crypto::kem::MlKem1024KeyPair;
+/// use aegis_crypto::version::ProtocolVersion;
+///
+/// let brainpool = Brainpool512SecretKey::generate();
+/// let ml_kem = MlKem1024KeyPair::generate();
+/// let public_keys = HybridPublicKeys {
+///     brainpool512: brainpool.public_key_bytes(),
+///     ml_kem1024_ek: ml_kem.encapsulation_key_bytes(),
+/// };
+///
+/// let (ciphertext, sender_key) =
+///     hybrid_kem_encapsulate(ProtocolVersion::V1, &public_keys).unwrap();
+/// let receiver_key = hybrid_kem_decapsulate(
+///     ProtocolVersion::V1,
+///     &brainpool,
+///     &ml_kem,
+///     &public_keys,
+///     &ciphertext,
+/// )
+/// .unwrap();
+/// assert_eq!(*sender_key, *receiver_key);
+/// ```
 pub fn hybrid_kem_encapsulate(
     protocol_version: ProtocolVersion,
     peer_keys: &HybridPublicKeys,

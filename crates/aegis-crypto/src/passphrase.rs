@@ -6,10 +6,17 @@
 
 use argon2::{Algorithm, Argon2, AssociatedData, ParamsBuilder, Version};
 
+/// Argon2id cost parameters. Use [`PRODUCTION_PARAMS`] in production —
+/// see [`derive_master_key_production`]; this struct is only
+/// constructed directly to reproduce the RFC 9106 known-answer test's
+/// deliberately weak parameters.
 #[derive(Debug, Clone, Copy)]
 pub struct Argon2Params {
+    /// Memory cost in KiB (Argon2's `m` parameter).
     pub memory_kib: u32,
+    /// Number of passes over memory (Argon2's `t` parameter).
     pub iterations: u32,
+    /// Degree of parallelism (Argon2's `p` parameter).
     pub parallelism: u32,
 }
 
@@ -34,6 +41,22 @@ pub const PRODUCTION_PARAMS: Argon2Params = Argon2Params {
 /// Propagates `argon2::Error` for an invalid `salt` (RFC 9106 requires
 /// at least 8 bytes), an over-long `associated_data`, or an `output`
 /// length outside Argon2's permitted range.
+///
+/// # Examples
+///
+/// ```
+/// use aegis_crypto::passphrase::derive_master_key_production;
+///
+/// let mut master_key = [0u8; 32];
+/// derive_master_key_production(
+///     b"correct horse battery staple",
+///     b"somesalt12345678",
+///     b"",
+///     b"",
+///     &mut master_key,
+/// )
+/// .unwrap();
+/// ```
 pub fn derive_master_key_production(
     password: &[u8],
     salt: &[u8],
