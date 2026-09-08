@@ -2389,10 +2389,16 @@ Add the field to the `RatchetState` struct definition (Task 6):
 
 Initialize it (`crate::skipped_keys::SkippedKeyCache::new()`) in both `from_x3dh_initiator` and `from_x3dh_responder`.
 
-Replace `dh_ratchet_step`'s body (Task 7) to derive-and-cache the old receiving chain's remaining keys **before** overwriting it — insert this at the very top of the function, before the existing `let kem_ciphertext = ...` line:
+Replace `dh_ratchet_step`'s body (Task 7) to derive-and-cache the old receiving chain's remaining keys **before** overwriting it — insert this at the very top of the function, before the existing `let kem_ciphertext = ...` line. `dh_ratchet_step` already returns `Result<(), RatchetError>`, so bounding this exactly like the `>` branch below is a natural fit — **do not omit the bound check**: `header.previous_chain_length` is a peer-controlled `u32` read straight off the wire with no range check elsewhere, and without this guard a single malicious header (`previous_chain_length = u32::MAX`) would trigger billions of `kdf_ck` calls before the message's own AEAD tag is ever checked:
 
 ```rust
         if let Some(old_chain) = &mut self.receiving_chain {
+            if header.previous_chain_length > self.receive_message_number {
+                let gap = header.previous_chain_length - self.receive_message_number;
+                if gap as usize > crate::skipped_keys::MAX_SKIP {
+                    return Err(RatchetError::SkippedKeyLimitExceeded);
+                }
+            }
             let mut chain_key = old_chain.chain_key.clone();
             while self.receive_message_number < header.previous_chain_length {
                 let (new_chain_key, message_key) = kdf_ck(&chain_key);
@@ -2407,44 +2413,74 @@ Replace `dh_ratchet_step`'s body (Task 7) to derive-and-cache the old receiving 
         }
 ```
 
-(`ChainState.chain_key` needs `#[derive(Clone)]`-equivalent support — `Zeroizing<[u8; N]>` already implements `Clone` since `[u8; N]` does, so `old_chain.chain_key.clone()` works without further changes.)
+(`ChainState.chain_key` needs `#[derive(Clone)]`-equivalent support — `Zeroizing<[u8; N]>` already implements `Clone` since `[u8; N]` does, so `old_chain.chain_key.clone()` works without further changes. The `if header.previous_chain_length > self.receive_message_number` guard before computing `gap` avoids a `u32` underflow panic when a header understates or omits `previous_chain_length` relative to what's already been received — in that case there's nothing to catch up on, so the `while` loop's own condition already handles it correctly; the point of the outer `if` is purely to make the subtraction inside it safe.)
 
-Replace `decrypt`'s message-number check (Task 9) — the block that currently returns `Err(RatchetError::UnknownMessage)` for any out-of-order message — with:
+**Task 10 restructures `decrypt`'s overall control flow, not just its message-number check.** Task 9's `decrypt` checks the ratchet-step trigger first, then handles message ordering only on the resulting (current) chain. That ordering is wrong for one case this task exists to handle: a message that arrives late from a chain the peer has *already superseded*. Its header still carries the *old* ratchet public key, which no longer equals `self.peer_ratchet_ecdh_public` (that field has moved on to the new chain) — so the existing trigger condition (`message.header.ratchet_ecdh_public != self.peer_ratchet_ecdh_public`) fires and calls `dh_ratchet_step` *again*, on a message that isn't the first message of any chain and so has no `kem_ciphertext` to ratchet with, instead of ever reaching a skip-cache lookup. The keys `dh_ratchet_step`'s old-chain catch-up loop (above) cached under that old peer key would then be permanently unreachable — silently defeating the entire point of caching them.
+
+The fix, matching how Signal's own reference `RatchetDecrypt` orders these checks: **try the skip-cache first, keyed by the header's own ratchet public key** (not `self.peer_ratchet_ecdh_public` — the header's key correctly addresses whichever chain, current or superseded, this specific message actually belongs to) **before deciding whether a DH ratchet step is needed at all.** This subsumes Task 9's message-number check entirely: replace `decrypt`'s full body with:
 
 ```rust
-        if message.header.message_number < self.receive_message_number {
-            let message_number = message.header.message_number;
-            let sender = self.peer_ratchet_ecdh_public;
-            let key = self
-                .skipped_message_keys
-                .take(sender, message_number)
-                .ok_or(RatchetError::UnknownMessage)?;
+    pub fn decrypt(&mut self, message: &RatchetMessage, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, RatchetError> {
+        // Try the skip-cache first, keyed by the header's OWN ratchet
+        // public key. This must run before any ratchet-step decision:
+        // a late message from an already-superseded chain carries a
+        // ratchet key that no longer matches self.peer_ratchet_ecdh_public,
+        // and would otherwise incorrectly trigger a second (invalid) DH
+        // ratchet step instead of being served from cache -- see this
+        // task's own review notes for why checking self.peer_ratchet_ecdh_public
+        // first was wrong.
+        if let Some(key) = self.skipped_message_keys.take(
+            message.header.ratchet_ecdh_public,
+            message.header.message_number,
+        ) {
             let nonce = [0u8; 12];
-            match aegis_crypto::aead::decrypt(
+            return match aegis_crypto::aead::decrypt(
                 aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
                 &key,
                 &nonce,
                 aad,
                 &message.ciphertext,
             ) {
-                Ok(plaintext) => return Ok(Zeroizing::new(plaintext)),
+                Ok(plaintext) => Ok(Zeroizing::new(plaintext)),
                 Err(_) => {
                     // Re-insert rather than let `.take()` permanently
                     // discard this key: a tampered/corrupted delivery
                     // of this message must not also make a later,
                     // correct retransmission of the same message
-                    // undecryptable. Mirrors the same "don't commit
-                    // state until the fallible step succeeds"
-                    // principle Task 9's review caught in the in-order
-                    // path (chain.chain_key advancing before the AEAD
-                    // call was known to succeed) -- applied here to
-                    // the skipped-key cache instead of the chain key.
-                    self.skipped_message_keys.insert(sender, message_number, key);
-                    return Err(RatchetError::DecryptionFailed);
+                    // undecryptable.
+                    self.skipped_message_keys.insert(
+                        message.header.ratchet_ecdh_public,
+                        message.header.message_number,
+                        key,
+                    );
+                    Err(RatchetError::DecryptionFailed)
                 }
-            }
+            };
         }
 
+        // Not in the skip cache -- if this header carries a ratchet
+        // public key we haven't ratcheted to yet, do the DH ratchet
+        // step now (Task 7), which also caches the old chain's still-
+        // outstanding keys before replacing it (this task, above).
+        if message.header.ratchet_ecdh_public != self.peer_ratchet_ecdh_public
+            || self.receiving_chain.is_none()
+        {
+            self.dh_ratchet_step(&message.header)?;
+        }
+
+        let chain = self.receiving_chain.as_mut().ok_or(RatchetError::UnknownMessage)?;
+
+        // Now on the current chain. A number below what we've already
+        // received and NOT in the skip cache (checked above) means
+        // either a genuine duplicate/replay, or a key evicted past the
+        // skip bound -- either way, not decryptable.
+        if message.header.message_number < self.receive_message_number {
+            return Err(RatchetError::UnknownMessage);
+        }
+
+        // A number ahead of what we've received: fast-forward the
+        // chain, caching every key we skip past, bounded by MAX_SKIP
+        // so a peer-controlled gap can't force unbounded derivation.
         if message.header.message_number > self.receive_message_number {
             let gap = message.header.message_number - self.receive_message_number;
             if gap as usize > crate::skipped_keys::MAX_SKIP {
@@ -2461,9 +2497,30 @@ Replace `decrypt`'s message-number check (Task 9) — the block that currently r
                 self.receive_message_number += 1;
             }
         }
+
+        // Exact match: the in-order case (Task 9). chain.chain_key is
+        // committed only after the AEAD call succeeds -- see Task 9's
+        // review for why committing it beforehand desyncs the chain
+        // on a decrypt failure.
+        let (new_chain_key, message_key) = kdf_ck(&chain.chain_key);
+        let nonce = [0u8; 12];
+        let plaintext = aegis_crypto::aead::decrypt(
+            aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
+            &message_key,
+            &nonce,
+            aad,
+            &message.ciphertext,
+        )
+        .map_err(|_| RatchetError::DecryptionFailed)?;
+
+        chain.chain_key = new_chain_key;
+        self.receive_message_number += 1;
+
+        Ok(Zeroizing::new(plaintext))
+    }
 ```
 
-...inserted immediately after the `let chain = self.receiving_chain.as_mut()...` line and before the existing in-order decrypt path (which now only runs for the exact `message_number == receive_message_number` case — the two blocks above return early for `<` and fast-forward in place for `>`).
+This replaces Task 9's entire `decrypt` method body (not just its message-number check) with the version above.
 
 - [ ] **Step 4: Write the out-of-order/eviction tests, then verify all pass**
 
