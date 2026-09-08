@@ -7,3 +7,12 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+aegis-crypto = { path = "../aegis-crypto" }
+zeroize = { version = "1.9", features = ["derive"] }
+hkdf = "0.13"
+sha2 = "0.11"
+hmac = "0.13"
+getrandom = "0.4"
+
+[dev-dependencies]
+hex = "0.4"
