@@ -1270,4 +1270,126 @@ mod tests {
         let plaintext_a_late = bob_state.decrypt(&chain_a_late, b"").unwrap();
         assert_eq!(&*plaintext_a_late, b"chain-a-late");
     }
+
+    #[test]
+    fn a_realistic_bidirectional_conversation_with_reordering_and_ratcheting() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+
+        // Bootstrap Bob's receiving chain with a single in-order
+        // message first. `RatchetHeader::kem_ciphertext` is present
+        // *only* on the first message of a newly started sending
+        // chain (design §4.3, Task 7/8 -- see
+        // `encrypt_message_increments_the_send_counter`, which asserts
+        // the second message of a chain carries no ciphertext at
+        // all), and it is the KEM leg of that first message's
+        // ciphertext that lets `dh_ratchet_step` derive the chain's
+        // keys at all (Task 7). A message that isn't the chain's first
+        // therefore cannot bootstrap `receiving_chain` on its own, no
+        // matter how decrypt's control flow is arranged -- this is a
+        // real, permanent constraint of the hybrid ECDH+ML-KEM
+        // ratchet, not a bug (see `out_of_order_message_still_decrypts`
+        // and Task 10's report for the same finding). Everything from
+        // here on exercises real reordering within an already
+        // established chain, which is what this test is for.
+        let bootstrap = alice_state.encrypt(b"hey", b"").unwrap();
+        assert_eq!(&*bob_state.decrypt(&bootstrap, b"").unwrap(), b"hey");
+
+        // Alice sends three more messages on the same chain.
+        let a1 = alice_state.encrypt(b"hi bob", b"").unwrap();
+        let a2 = alice_state.encrypt(b"how are you", b"").unwrap();
+        let a3 = alice_state.encrypt(b"?", b"").unwrap();
+
+        // Bob receives them out of order: a2, a1, a3.
+        assert_eq!(&*bob_state.decrypt(&a2, b"").unwrap(), b"how are you");
+        assert_eq!(&*bob_state.decrypt(&a1, b"").unwrap(), b"hi bob");
+        assert_eq!(&*bob_state.decrypt(&a3, b"").unwrap(), b"?");
+
+        // Bob replies -- this is his first send, so it's a DH ratchet step.
+        let b1 = bob_state.encrypt(b"good, you?", b"").unwrap();
+        assert!(b1.header.kem_ciphertext.is_some());
+        assert_eq!(&*alice_state.decrypt(&b1, b"").unwrap(), b"good, you?");
+
+        // Alice replies -- another DH ratchet step, since Bob's message
+        // carried a ratchet key Alice hadn't seen.
+        let a4 = alice_state.encrypt(b"great!", b"").unwrap();
+        assert!(a4.header.kem_ciphertext.is_some());
+        assert_eq!(&*bob_state.decrypt(&a4, b"").unwrap(), b"great!");
+
+        // A longer run after ratcheting, still in order, to confirm the
+        // chain continues to advance correctly post-ratchet.
+        for i in 0..10u32 {
+            let msg = alice_state.encrypt(format!("message {i}").as_bytes(), b"").unwrap();
+            let plaintext = bob_state.decrypt(&msg, b"").unwrap();
+            assert_eq!(plaintext.as_slice(), format!("message {i}").as_bytes());
+        }
+    }
+
+    #[test]
+    fn a_long_gap_then_catch_up_derives_every_intervening_key() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+
+        // Bootstrap Bob's receiving chain with a single in-order
+        // message first -- see the comment in
+        // `a_realistic_bidirectional_conversation_with_reordering_and_ratcheting`
+        // for why the chain's first (KEM-ciphertext-bearing) message
+        // must be processed before any later message on it, in any
+        // order, can be. The 50-message gap-and-catch-up below all
+        // happens strictly after that bootstrap, which is exactly the
+        // scenario this test exists to cover.
+        let bootstrap = alice_state.encrypt(b"start", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        let mut messages = Vec::new();
+        for i in 0..50u32 {
+            messages.push(alice_state.encrypt(format!("msg {i}").as_bytes(), b"").unwrap());
+        }
+
+        // Bob only ever sees the last one first.
+        let plaintext = bob_state.decrypt(&messages[49], b"").unwrap();
+        assert_eq!(plaintext.as_slice(), b"msg 49");
+
+        // Then catches up on all the earlier ones, in reverse order.
+        for i in (0..49u32).rev() {
+            let plaintext = bob_state.decrypt(&messages[i as usize], b"").unwrap();
+            assert_eq!(plaintext.as_slice(), format!("msg {i}").as_bytes());
+        }
+    }
+
+    #[test]
+    fn a_non_bootstrap_message_cannot_be_decrypted_before_the_chains_first_message() {
+        // Documents a real, permanent constraint of this protocol
+        // design that Task 10's report identified but left uncovered
+        // by an explicit test of its own: unlike a pure-DH ratchet
+        // (where any header carrying a new public key can bootstrap a
+        // ratchet step on its own), this hybrid ECDH+ML-KEM ratchet
+        // needs the specific KEM ciphertext carried ONLY on a chain's
+        // first message (design §4.3, Task 7/8) to derive that
+        // chain's keys -- ML-KEM decapsulation has no equivalent of
+        // "just do the exchange again" the way ECDH does. A message
+        // from a chain whose first message has never been delivered
+        // therefore cannot be decrypted, full stop; this must fail
+        // cleanly with `MalformedMessage`, never panic, and must not
+        // be confused with a decryption/authentication failure.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let _first = alice_state.encrypt(b"one", b"").unwrap();
+        let second = alice_state.encrypt(b"two", b"").unwrap();
+
+        assert_eq!(
+            bob_state.decrypt(&second, b"").unwrap_err(),
+            RatchetError::MalformedMessage,
+        );
+    }
+
+    #[test]
+    fn malformed_wire_bytes_are_rejected_at_every_public_entry_point_without_panicking() {
+        use crate::prekey::PreKeyBundle;
+        use crate::state::{RatchetMessage, RatchetState};
+
+        for len in [0, 1, 10, 500] {
+            let junk = vec![0xAAu8; len];
+            assert!(PreKeyBundle::from_bytes(&junk).is_err());
+            assert!(RatchetMessage::from_bytes(&junk).is_err());
+            assert!(RatchetState::from_bytes(&junk).is_err());
+        }
+    }
 }

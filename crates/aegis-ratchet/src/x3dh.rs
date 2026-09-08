@@ -102,11 +102,18 @@ impl X3DHPreamble {
     }
 }
 
+/// `initiate_x3dh`'s success value: `(root_key, preamble,
+/// alice_ephemeral_ecdh_public)` — the caller (Task 6) uses
+/// `alice_ephemeral_ecdh_public` again as Alice's first ratchet public
+/// key, so it's returned directly rather than making Task 6 re-parse
+/// it out of `preamble`. Named purely to satisfy clippy's
+/// `type_complexity` lint under `-D warnings`; carries no behavior of
+/// its own.
+pub type X3dhInitiateResult = Result<(Zeroizing<[u8; ROOT_KEY_LEN]>, X3DHPreamble, [u8; ECDH_PUBLIC_KEY_LEN]), RatchetError>;
+
 /// Compute Alice's X3DH shared secret and preamble against Bob's
 /// `peer_bundle`. Returns `(root_key, preamble, alice_ephemeral_ecdh_public)`
-/// — the caller (Task 6) uses `alice_ephemeral_ecdh_public` again as
-/// Alice's first ratchet public key, so it's returned directly rather
-/// than making Task 6 re-parse it out of `preamble`.
+/// — see [`X3dhInitiateResult`] for why that shape is returned.
 ///
 /// # Errors
 ///
@@ -118,7 +125,7 @@ pub fn initiate_x3dh(
     my_identity: &IdentityKeyPair,
     peer_bundle: &PreKeyBundle,
     protocol_version: ProtocolVersion,
-) -> Result<(Zeroizing<[u8; ROOT_KEY_LEN]>, X3DHPreamble, [u8; ECDH_PUBLIC_KEY_LEN]), RatchetError> {
+) -> X3dhInitiateResult {
     if !verify_signed_pre_key(&peer_bundle.identity, &peer_bundle.signed_pre_key) {
         return Err(RatchetError::InvalidBundleSignature);
     }
