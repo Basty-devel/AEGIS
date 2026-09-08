@@ -13,3 +13,4 @@ pub mod state;
 pub mod x3dh;
 
 pub use error::RatchetError;
+pub use state::{RatchetHeader, RatchetMessage, RatchetState};

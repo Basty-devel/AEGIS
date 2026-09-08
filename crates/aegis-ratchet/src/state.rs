@@ -5,7 +5,7 @@
 use core::fmt;
 
 use crate::error::RatchetError;
-use crate::kdf_chain::{kdf_rk, CHAIN_KEY_LEN, ROOT_KEY_LEN};
+use crate::kdf_chain::{kdf_ck, kdf_rk, CHAIN_KEY_LEN, ROOT_KEY_LEN};
 use crate::prekey::{ByteCursor, ECDH_PUBLIC_KEY_LEN, KEM_CIPHERTEXT_LEN, KEM_ENCAPSULATION_KEY_LEN};
 use aegis_crypto::ecdh::Brainpool512SecretKey;
 use aegis_crypto::kem::MlKem1024KeyPair;
@@ -369,6 +369,54 @@ impl RatchetState {
             previous_chain_length: self.previous_chain_length,
         })
     }
+
+    /// Encrypt `plaintext`, advancing the sending chain by one message
+    /// (design §4.1). Starts a fresh sending chain first if none
+    /// exists yet (first call ever, or right after a DH ratchet step
+    /// populated `receiving_chain` but not `sending_chain`).
+    pub fn encrypt(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<RatchetMessage, RatchetError> {
+        let mut header = match &self.sending_chain {
+            Some(_) => RatchetHeader {
+                ratchet_ecdh_public: self
+                    .self_ratchet_ecdh
+                    .public_key_bytes()
+                    .try_into()
+                    .expect("public_key_bytes is always ECDH_PUBLIC_KEY_LEN bytes"),
+                ratchet_kem_public: self
+                    .self_ratchet_kem
+                    .encapsulation_key_bytes()
+                    .try_into()
+                    .expect("encapsulation_key_bytes is always KEM_ENCAPSULATION_KEY_LEN bytes"),
+                kem_ciphertext: None,
+                message_number: 0, // set below
+                previous_chain_length: self.previous_chain_length,
+            },
+            None => self.start_sending_chain()?,
+        };
+
+        let chain = self
+            .sending_chain
+            .as_mut()
+            .expect("either the existing branch above or start_sending_chain populated this");
+        let (new_chain_key, message_key) = kdf_ck(&chain.chain_key);
+        chain.chain_key = new_chain_key;
+
+        header.message_number = self.send_message_number;
+
+        let nonce = [0u8; 12]; // safe: message_key is single-use, see Task 8 notes below
+        let ciphertext = aegis_crypto::aead::encrypt(
+            aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
+            &message_key,
+            &nonce,
+            aad,
+            plaintext,
+        )
+        .map_err(|_| RatchetError::DecryptionFailed)?; // encrypt only fails on malformed inputs, which don't occur here; kept as a Result for symmetry with decrypt
+
+        self.send_message_number += 1;
+
+        Ok(RatchetMessage { header, ciphertext })
+    }
 }
 
 /// One ratchet message's header (design §4.3). `ratchet_kem_public` is
@@ -619,5 +667,42 @@ mod tests {
         assert!(alice_state.sending_chain.is_some());
         assert!(header.kem_ciphertext.is_some(), "first message of a new chain must carry the KEM leg");
         assert_eq!(header.ratchet_ecdh_public, alice_state.self_ratchet_ecdh.public_key_bytes().as_slice());
+    }
+
+    #[test]
+    fn encrypt_message_starts_a_sending_chain_on_first_call() {
+        let root_key = [0x33u8; ROOT_KEY_LEN];
+        let bob_ecdh = Brainpool512SecretKey::generate();
+        let bob_kem = MlKem1024KeyPair::generate();
+        let mut state = RatchetState::from_x3dh_initiator(
+            root_key,
+            bob_ecdh.public_key_bytes().try_into().unwrap(),
+            bob_kem.encapsulation_key_bytes().try_into().unwrap(),
+        );
+
+        assert!(state.sending_chain.is_none());
+        let message = state.encrypt(b"hello", b"").unwrap();
+        assert!(state.sending_chain.is_some());
+        assert!(message.header.kem_ciphertext.is_some());
+        assert_eq!(message.header.message_number, 0);
+    }
+
+    #[test]
+    fn encrypt_message_increments_the_send_counter() {
+        let root_key = [0x33u8; ROOT_KEY_LEN];
+        let bob_ecdh = Brainpool512SecretKey::generate();
+        let bob_kem = MlKem1024KeyPair::generate();
+        let mut state = RatchetState::from_x3dh_initiator(
+            root_key,
+            bob_ecdh.public_key_bytes().try_into().unwrap(),
+            bob_kem.encapsulation_key_bytes().try_into().unwrap(),
+        );
+
+        let first = state.encrypt(b"one", b"").unwrap();
+        let second = state.encrypt(b"two", b"").unwrap();
+        assert_eq!(first.header.message_number, 0);
+        assert_eq!(second.header.message_number, 1);
+        assert!(second.header.kem_ciphertext.is_none(), "same chain, no new ratchet step needed");
+        assert_ne!(first.ciphertext, second.ciphertext);
     }
 }
