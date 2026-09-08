@@ -83,6 +83,35 @@ impl Brainpool512SecretKey {
     pub fn public_key_bytes(&self) -> Vec<u8> {
         self.0.public_key().to_sec1_bytes().to_vec()
     }
+
+    /// The raw 64-byte private scalar, for callers that need to
+    /// persist this key themselves (e.g. `aegis-ratchet`'s
+    /// `RatchetState` serialization). Wrapped in [`Zeroizing`] like
+    /// every other secret this crate returns.
+    pub fn to_bytes(&self) -> Zeroizing<[u8; 64]> {
+        let field_bytes = self.0.to_bytes();
+        let mut out = Zeroizing::new([0u8; 64]);
+        out.copy_from_slice(&field_bytes);
+        out
+    }
+
+    /// Reconstruct a key from bytes produced by [`Self::to_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidPeerPublicKey`] if `bytes` is not
+    /// a valid brainpool512r1 scalar. (Reusing that variant rather
+    /// than adding a new one: both mean "not a valid point/scalar
+    /// encoding for this curve," and `CryptoError` is
+    /// `#[non_exhaustive]` specifically so callers don't need to
+    /// exhaustively match every variant -- see `error.rs`'s own
+    /// module doc.)
+    pub fn from_bytes(bytes: &[u8; 64]) -> Result<Self, CryptoError> {
+        let field_bytes = elliptic_curve::FieldBytes::<BrainpoolP512r1>::from(*bytes);
+        SecretKey::<BrainpoolP512r1>::from_bytes(&field_bytes)
+            .map(Self)
+            .map_err(|_| CryptoError::InvalidPeerPublicKey)
+    }
 }
 
 /// Compute the brainpoolP512r1 ECDH shared secret between `secret` and
@@ -253,6 +282,21 @@ mod tests {
                 "malformed peer key must return an error, not panic",
             );
         }
+    }
+
+    #[test]
+    fn secret_key_round_trips_through_to_bytes() {
+        let original = Brainpool512SecretKey::generate();
+        let bytes = original.to_bytes();
+        let restored = Brainpool512SecretKey::from_bytes(&bytes).unwrap();
+        // Compare via a shared peer rather than field access (the
+        // inner SecretKey has no PartialEq) -- if the round trip
+        // preserved the scalar, both sides compute the same shared
+        // secret with a third party.
+        let peer = Brainpool512SecretKey::generate();
+        let original_shared = brainpool512_diffie_hellman(&original, &peer.public_key_bytes()).unwrap();
+        let restored_shared = brainpool512_diffie_hellman(&restored, &peer.public_key_bytes()).unwrap();
+        assert_eq!(*original_shared, *restored_shared);
     }
 
     #[test]
