@@ -5,7 +5,7 @@
 use core::fmt;
 
 use crate::error::RatchetError;
-use crate::kdf_chain::{CHAIN_KEY_LEN, ROOT_KEY_LEN};
+use crate::kdf_chain::{kdf_rk, CHAIN_KEY_LEN, ROOT_KEY_LEN};
 use crate::prekey::{ByteCursor, ECDH_PUBLIC_KEY_LEN, KEM_CIPHERTEXT_LEN, KEM_ENCAPSULATION_KEY_LEN};
 use aegis_crypto::ecdh::Brainpool512SecretKey;
 use aegis_crypto::kem::MlKem1024KeyPair;
@@ -277,6 +277,98 @@ impl RatchetState {
             previous_chain_length,
         })
     }
+
+    /// Compute this ratchet step's hybrid shared secret: a
+    /// brainpool512r1 DH output concatenated with an ML-KEM-1024
+    /// shared secret, per design §3 item 2 ("every message roundtrip
+    /// injects a new ML-KEM-1024 encapsulation paired with a
+    /// brainpool512r1 ephemeral exchange").
+    fn hybrid_ratchet_secret(
+        ecdh_shared: &[u8; 64],
+        kem_shared: &[u8; 32],
+    ) -> Zeroizing<[u8; 96]> {
+        let mut out = Zeroizing::new([0u8; 96]);
+        out[..64].copy_from_slice(ecdh_shared);
+        out[64..].copy_from_slice(kem_shared);
+        out
+    }
+
+    /// A DH ratchet step, triggered when `header` carries a peer
+    /// ratchet public key not yet seen (design §3.2). Advances
+    /// `receiving_chain` using `header`'s KEM ciphertext (which must
+    /// be present -- the first message of any new peer chain always
+    /// carries one, by construction of [`Self::start_sending_chain`]),
+    /// generates a fresh self-ratchet keypair, and starts a new
+    /// `sending_chain` toward the peer's newly announced public keys.
+    pub(crate) fn dh_ratchet_step(&mut self, header: &RatchetHeader) -> Result<(), RatchetError> {
+        let kem_ciphertext = header.kem_ciphertext.ok_or(RatchetError::MalformedMessage)?;
+
+        let ecdh_shared =
+            aegis_crypto::ecdh::brainpool512_diffie_hellman(&self.self_ratchet_ecdh, &header.ratchet_ecdh_public)?;
+        let kem_shared = aegis_crypto::kem::ml_kem_decapsulate(&self.self_ratchet_kem, &kem_ciphertext)?;
+        let hybrid_secret = Self::hybrid_ratchet_secret(&ecdh_shared, &kem_shared);
+
+        let (new_root_key, chain_key) = kdf_rk(&self.root_key, hybrid_secret.as_ref());
+        self.root_key = new_root_key;
+        self.receiving_chain = Some(ChainState { chain_key });
+        self.receive_message_number = 0;
+        self.previous_chain_length = self.send_message_number;
+
+        self.peer_ratchet_ecdh_public = header.ratchet_ecdh_public;
+        self.peer_ratchet_kem_public = header.ratchet_kem_public;
+
+        // A fresh keypair for our own next sending chain -- generated
+        // now so the *next* start_sending_chain call (from
+        // encrypt_message, whenever we next send) uses it, matching
+        // Signal's "generate immediately on receiving a new ratchet
+        // key" step.
+        self.self_ratchet_ecdh = Brainpool512SecretKey::generate();
+        self.self_ratchet_kem = MlKem1024KeyPair::generate();
+        self.sending_chain = None;
+        self.send_message_number = 0;
+
+        Ok(())
+    }
+
+    /// Start a fresh sending chain toward `peer_ratchet_ecdh_public`/
+    /// `peer_ratchet_kem_public`, encapsulating a fresh KEM ciphertext
+    /// against the peer's current KEM public key (design §3.1/§4.3).
+    /// Returns the header the resulting message must carry -- this is
+    /// the *only* header shape that ever carries `kem_ciphertext:
+    /// Some(_)`, which is exactly what marks "first message of a new
+    /// chain" to the receiver.
+    pub(crate) fn start_sending_chain(&mut self) -> Result<RatchetHeader, RatchetError> {
+        let ecdh_shared = aegis_crypto::ecdh::brainpool512_diffie_hellman(
+            &self.self_ratchet_ecdh,
+            &self.peer_ratchet_ecdh_public,
+        )?;
+        let (kem_ciphertext_vec, kem_shared) =
+            aegis_crypto::kem::ml_kem_encapsulate(&self.peer_ratchet_kem_public)?;
+        let kem_ciphertext: [u8; KEM_CIPHERTEXT_LEN] = kem_ciphertext_vec
+            .try_into()
+            .expect("ml_kem_encapsulate ciphertext is always KEM_CIPHERTEXT_LEN bytes");
+        let hybrid_secret = Self::hybrid_ratchet_secret(&ecdh_shared, &kem_shared);
+
+        let (new_root_key, chain_key) = kdf_rk(&self.root_key, hybrid_secret.as_ref());
+        self.root_key = new_root_key;
+        self.sending_chain = Some(ChainState { chain_key });
+
+        Ok(RatchetHeader {
+            ratchet_ecdh_public: self
+                .self_ratchet_ecdh
+                .public_key_bytes()
+                .try_into()
+                .expect("public_key_bytes is always ECDH_PUBLIC_KEY_LEN bytes"),
+            ratchet_kem_public: self
+                .self_ratchet_kem
+                .encapsulation_key_bytes()
+                .try_into()
+                .expect("encapsulation_key_bytes is always KEM_ENCAPSULATION_KEY_LEN bytes"),
+            kem_ciphertext: Some(kem_ciphertext),
+            message_number: 0, // caller (encrypt_message, Task 8) fills in the real number
+            previous_chain_length: self.previous_chain_length,
+        })
+    }
 }
 
 /// One ratchet message's header (design §4.3). `ratchet_kem_public` is
@@ -474,5 +566,58 @@ mod tests {
         let decoded = RatchetMessage::from_bytes(&message.to_bytes()).unwrap();
         assert_eq!(decoded.header, message.header);
         assert_eq!(decoded.ciphertext, message.ciphertext);
+    }
+
+    #[test]
+    fn dh_ratchet_step_updates_receiving_chain_from_a_new_peer_header() {
+        let root_key = [0x33u8; ROOT_KEY_LEN];
+        let bob_spk_ecdh = Brainpool512SecretKey::generate();
+        let bob_spk_kem = MlKem1024KeyPair::generate();
+        let mut alice_state = RatchetState::from_x3dh_initiator(
+            root_key,
+            bob_spk_ecdh.public_key_bytes().try_into().unwrap(),
+            bob_spk_kem.encapsulation_key_bytes().try_into().unwrap(),
+        );
+
+        // Simulate a header arriving with a ratchet public key alice_state
+        // hasn't ratcheted to yet: encapsulate against alice's OWN current
+        // ratchet KEM public key, as a peer starting a new chain toward
+        // her would.
+        let sender_ecdh = Brainpool512SecretKey::generate();
+        let (kem_ciphertext, _ss) =
+            aegis_crypto::kem::ml_kem_encapsulate(&alice_state.self_ratchet_kem.encapsulation_key_bytes())
+                .unwrap();
+        let header = RatchetHeader {
+            ratchet_ecdh_public: sender_ecdh.public_key_bytes().try_into().unwrap(),
+            ratchet_kem_public: MlKem1024KeyPair::generate().encapsulation_key_bytes().try_into().unwrap(),
+            kem_ciphertext: Some(kem_ciphertext.try_into().unwrap()),
+            message_number: 0,
+            previous_chain_length: 0,
+        };
+
+        assert!(alice_state.receiving_chain.is_none());
+        alice_state.dh_ratchet_step(&header).unwrap();
+        assert!(alice_state.receiving_chain.is_some());
+        assert_eq!(alice_state.peer_ratchet_ecdh_public, header.ratchet_ecdh_public);
+        assert_eq!(alice_state.peer_ratchet_kem_public, header.ratchet_kem_public);
+        assert_eq!(alice_state.receive_message_number, 0);
+    }
+
+    #[test]
+    fn start_sending_chain_populates_the_chain_and_returns_a_matching_header() {
+        let root_key = [0x33u8; ROOT_KEY_LEN];
+        let bob_spk_ecdh = Brainpool512SecretKey::generate();
+        let bob_spk_kem = MlKem1024KeyPair::generate();
+        let mut alice_state = RatchetState::from_x3dh_initiator(
+            root_key,
+            bob_spk_ecdh.public_key_bytes().try_into().unwrap(),
+            bob_spk_kem.encapsulation_key_bytes().try_into().unwrap(),
+        );
+
+        assert!(alice_state.sending_chain.is_none());
+        let header = alice_state.start_sending_chain().unwrap();
+        assert!(alice_state.sending_chain.is_some());
+        assert!(header.kem_ciphertext.is_some(), "first message of a new chain must carry the KEM leg");
+        assert_eq!(header.ratchet_ecdh_public, alice_state.self_ratchet_ecdh.public_key_bytes().as_slice());
     }
 }
