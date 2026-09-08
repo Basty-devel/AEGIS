@@ -148,7 +148,14 @@ impl RatchetState {
     /// -- `peer_ratchet_kem_public` -- the three `u32` counters,
     /// big-endian. [`Self::from_bytes`] must consume fields in this
     /// exact order.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// Returns `Zeroizing<Vec<u8>>`, not a plain `Vec<u8>`: this buffer
+    /// carries the entire secret ratchet session state (root key, chain
+    /// keys, the private ECDH scalar, the KEM seed), so it must be wiped
+    /// on drop like every other secret buffer in this crate, even though
+    /// it's also the value most likely to be persisted or transmitted by
+    /// a caller.
+    pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
         let mut out = Vec::new();
         out.extend_from_slice(&*self.root_key);
 
@@ -174,7 +181,7 @@ impl RatchetState {
         out.extend_from_slice(&self.send_message_number.to_be_bytes());
         out.extend_from_slice(&self.receive_message_number.to_be_bytes());
         out.extend_from_slice(&self.previous_chain_length.to_be_bytes());
-        out
+        Zeroizing::new(out)
     }
 
     /// Reconstruct a [`RatchetState`] from bytes produced by
