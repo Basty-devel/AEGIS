@@ -353,6 +353,20 @@ impl RatchetState {
         // stranded: once `receiving_chain` is replaced below, there is
         // no way to derive that old chain's keys again.
         if let Some(old_chain) = &mut self.receiving_chain {
+            // Bound the catch-up gap before deriving anything:
+            // `header.previous_chain_length` is a peer-controlled `u32`
+            // read straight off the wire (Finding #1). Without this
+            // check, a malicious header (e.g. `previous_chain_length =
+            // u32::MAX`) would drive this loop through billions of
+            // `kdf_ck` calls before the message's own AEAD tag is ever
+            // checked -- a DoS. Guarded against `u32` underflow: only
+            // compute the gap when there actually is one.
+            if header.previous_chain_length > self.receive_message_number {
+                let gap = header.previous_chain_length - self.receive_message_number;
+                if gap as usize > crate::skipped_keys::MAX_SKIP {
+                    return Err(RatchetError::SkippedKeyLimitExceeded);
+                }
+            }
             let mut chain_key = old_chain.chain_key.clone();
             while self.receive_message_number < header.previous_chain_length {
                 let (new_chain_key, message_key) = kdf_ck(&chain_key);
@@ -488,27 +502,23 @@ impl RatchetState {
     /// Performs a DH ratchet step first if `message.header` carries a
     /// peer ratchet public key not yet seen.
     pub fn decrypt(&mut self, message: &RatchetMessage, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, RatchetError> {
-        if message.header.ratchet_ecdh_public != self.peer_ratchet_ecdh_public
-            || self.receiving_chain.is_none()
+        // Try the skip-cache FIRST, keyed by the message's OWN header
+        // ratchet key -- not `self.peer_ratchet_ecdh_public` -- and
+        // before any ratchet-step decision (Finding #2). A message that
+        // arrives late from a chain the peer has already superseded
+        // carries that OLD ratchet key in its header, which no longer
+        // matches `self.peer_ratchet_ecdh_public`; checking the cache
+        // by the header's own key, before deciding whether a DH ratchet
+        // step is needed, is the only way such a message ever reaches
+        // the key `dh_ratchet_step`'s old-chain catch-up cached for it
+        // when the peer ratcheted forward. This mirrors Signal's own
+        // reference `RatchetDecrypt`, where `TrySkippedMessageKeys` runs
+        // before `DHRatchet`.
+        let header_sender = message.header.ratchet_ecdh_public;
+        if let Some(key) = self
+            .skipped_message_keys
+            .take(header_sender, message.header.message_number)
         {
-            self.dh_ratchet_step(&message.header)?;
-        }
-
-        let chain = self
-            .receiving_chain
-            .as_mut()
-            .ok_or(RatchetError::UnknownMessage)?; // dh_ratchet_step above always populates this when it runs; None here means a header we can't process
-
-        if message.header.message_number < self.receive_message_number {
-            // Already-advanced-past message number: look it up in the
-            // skipped-key cache rather than the live chain (the live
-            // chain has already moved past this point).
-            let message_number = message.header.message_number;
-            let sender = self.peer_ratchet_ecdh_public;
-            let key = self
-                .skipped_message_keys
-                .take(sender, message_number)
-                .ok_or(RatchetError::UnknownMessage)?;
             let nonce = [0u8; 12];
             return match aegis_crypto::aead::decrypt(
                 aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
@@ -529,10 +539,29 @@ impl RatchetState {
                     // path (chain.chain_key advancing before the AEAD
                     // call was known to succeed) -- applied here to
                     // the skipped-key cache instead of the chain key.
-                    self.skipped_message_keys.insert(sender, message_number, key);
+                    self.skipped_message_keys
+                        .insert(header_sender, message.header.message_number, key);
                     Err(RatchetError::DecryptionFailed)
                 }
             };
+        }
+
+        if message.header.ratchet_ecdh_public != self.peer_ratchet_ecdh_public
+            || self.receiving_chain.is_none()
+        {
+            self.dh_ratchet_step(&message.header)?;
+        }
+
+        let chain = self
+            .receiving_chain
+            .as_mut()
+            .ok_or(RatchetError::UnknownMessage)?; // dh_ratchet_step above always populates this when it runs; None here means a header we can't process
+
+        if message.header.message_number < self.receive_message_number {
+            // Already consumed on the live chain, and the skip-cache
+            // lookup above (keyed by this exact header) already missed
+            // -- there is nothing left to try.
+            return Err(RatchetError::UnknownMessage);
         }
 
         if message.header.message_number > self.receive_message_number {
@@ -1122,5 +1151,123 @@ mod tests {
         // must round trip byte-for-byte too.
         let re_restored = RatchetState::from_bytes(&bytes).unwrap();
         assert_eq!(re_restored.to_bytes(), bytes, "round trip must be exact");
+    }
+
+    #[test]
+    fn decrypt_rejects_a_header_with_an_extreme_previous_chain_length() {
+        // Regression test for Finding #1 (Critical): `dh_ratchet_step`'s
+        // old-chain catch-up loop derived keys up to
+        // `header.previous_chain_length` -- a peer-controlled `u32` read
+        // straight off the wire -- with no bound check, unlike the
+        // sibling `>`-branch in `decrypt`, which correctly checks
+        // `MAX_SKIP` first. A malicious header claiming
+        // `previous_chain_length = u32::MAX` must be rejected with
+        // `SkippedKeyLimitExceeded`, not trigger billions of `kdf_ck`
+        // calls before the message's own AEAD tag is ever checked.
+        //
+        // Driven through the public `decrypt` API (not `dh_ratchet_step`
+        // directly), matching how a real malicious/corrupted message
+        // would actually reach this code path.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+        // Bob's receive_message_number is now 1, and receiving_chain is
+        // Some -- the exact precondition `dh_ratchet_step`'s catch-up
+        // loop needs to run at all.
+
+        // Forge a header carrying a ratchet key Bob hasn't seen yet
+        // (forcing the DH-ratchet-step path in `decrypt`), with a
+        // malicious `previous_chain_length` far beyond `MAX_SKIP` past
+        // Bob's current `receive_message_number`. The KEM ciphertext is
+        // still validly encapsulated against Bob's own KEM public key so
+        // that, absent the fix, execution would actually reach the
+        // unbounded derivation loop rather than failing for an unrelated
+        // reason first.
+        let attacker_ecdh = Brainpool512SecretKey::generate();
+        let (kem_ciphertext, _shared_secret) =
+            aegis_crypto::kem::ml_kem_encapsulate(&bob_state.self_ratchet_kem.encapsulation_key_bytes())
+                .unwrap();
+        let malicious_header = RatchetHeader {
+            ratchet_ecdh_public: attacker_ecdh.public_key_bytes().try_into().unwrap(),
+            ratchet_kem_public: MlKem1024KeyPair::generate().encapsulation_key_bytes().try_into().unwrap(),
+            kem_ciphertext: Some(kem_ciphertext.try_into().unwrap()),
+            message_number: 0,
+            previous_chain_length: u32::MAX,
+        };
+        let malicious_message = RatchetMessage {
+            header: malicious_header,
+            ciphertext: vec![0u8; 16],
+        };
+
+        assert_eq!(
+            bob_state.decrypt(&malicious_message, b"").unwrap_err(),
+            RatchetError::SkippedKeyLimitExceeded,
+        );
+    }
+
+    #[test]
+    fn late_message_from_a_superseded_chain_hits_the_skip_cache() {
+        // Regression test for Finding #2 (Critical): `decrypt`'s control
+        // flow checked "does this header need a DH ratchet step?" BEFORE
+        // ever consulting the skip-cache, and the skip-cache lookup
+        // itself was keyed on `self.peer_ratchet_ecdh_public` (the
+        // CURRENT peer key) rather than the message header's own ratchet
+        // key. A message that arrives late from a chain the peer has
+        // already superseded carries the OLD ratchet key in its header
+        // -- which no longer matches `self.peer_ratchet_ecdh_public` --
+        // so it used to incorrectly trigger a second, invalid
+        // `dh_ratchet_step` call instead of ever reaching the cache.
+        //
+        // This is the realistic three-message, cross-ratchet scenario
+        // the reviewer noted no test exercised: Alice sends on chain A,
+        // Bob partially receives it, Alice ratchets to chain B (in
+        // response to a message from Bob) and sends on B, Bob processes
+        // the chain-B message BEFORE the outstanding chain-A message
+        // arrives late.
+        let (mut alice_state, mut bob_state) = two_party_session();
+
+        // Bootstrap Bob's receiving chain (chain A) with an in-order
+        // message -- see `out_of_order_message_still_decrypts` for why
+        // this first step must be in-order.
+        let bootstrap = alice_state.encrypt(b"chain-a-zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        // Alice sends a second message on chain A. This one will be
+        // held back and delivered late, after Alice has ratcheted past
+        // it entirely.
+        let chain_a_late = alice_state.encrypt(b"chain-a-late", b"").unwrap();
+
+        // Bob replies. This gives Alice a peer ratchet key she hasn't
+        // seen, which -- when she decrypts it -- triggers Alice's OWN DH
+        // ratchet step and resets her sending_chain to None.
+        let bob_reply = bob_state.encrypt(b"bob-says-hi", b"").unwrap();
+        alice_state.decrypt(&bob_reply, b"").unwrap();
+
+        // Alice's next encrypt call starts a brand-new sending chain
+        // (chain B) toward Bob, using a freshly generated ratchet
+        // keypair -- distinct from chain A's.
+        let chain_b_msg = alice_state.encrypt(b"chain-b-hello", b"").unwrap();
+        assert_ne!(
+            chain_b_msg.header.ratchet_ecdh_public, chain_a_late.header.ratchet_ecdh_public,
+            "chain B must carry a new ratchet key, distinct from chain A's",
+        );
+
+        // Bob processes the chain-B message BEFORE the outstanding
+        // chain-A message arrives. Because this carries a ratchet key
+        // Bob hasn't seen, it triggers Bob's OWN `dh_ratchet_step` --
+        // with `old_chain.is_some()` true (chain A is still his
+        // receiving_chain) -- which must derive and cache chain A's
+        // still-outstanding key (message_number 1, "chain-a-late")
+        // before overwriting receiving_chain with chain B.
+        let plaintext_b = bob_state.decrypt(&chain_b_msg, b"").unwrap();
+        assert_eq!(&*plaintext_b, b"chain-b-hello");
+
+        // The late chain-A message now arrives, carrying chain A's OLD
+        // ratchet key in its header -- which no longer matches Bob's
+        // current `peer_ratchet_ecdh_public` (now chain B's key). It
+        // must decrypt by hitting the skip-cache under the header's own
+        // key, NOT by triggering a second, invalid DH ratchet step.
+        let plaintext_a_late = bob_state.decrypt(&chain_a_late, b"").unwrap();
+        assert_eq!(&*plaintext_a_late, b"chain-a-late");
     }
 }
