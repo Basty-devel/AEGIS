@@ -7,5 +7,6 @@
 //! module's public API once it exists.
 
 pub mod error;
+pub mod kdf_chain;
 
 pub use error::RatchetError;
