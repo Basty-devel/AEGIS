@@ -9,6 +9,7 @@
 pub mod error;
 pub mod kdf_chain;
 pub mod prekey;
+mod skipped_keys;
 pub mod state;
 pub mod x3dh;
 

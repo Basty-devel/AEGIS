@@ -33,6 +33,10 @@ pub struct RatchetState {
     pub(crate) send_message_number: u32,
     pub(crate) receive_message_number: u32,
     pub(crate) previous_chain_length: u32,
+    /// Message keys derived ahead of the current receive counter, kept
+    /// around so a message that arrives out of order still decrypts
+    /// (Task 10, design §5). Bounded to `skipped_keys::MAX_SKIP` entries.
+    pub(crate) skipped_message_keys: crate::skipped_keys::SkippedKeyCache,
 }
 
 // Manual `Debug`, not `#[derive(Debug)]`: `Brainpool512SecretKey` and
@@ -55,6 +59,7 @@ impl fmt::Debug for RatchetState {
             .field("send_message_number", &self.send_message_number)
             .field("receive_message_number", &self.receive_message_number)
             .field("previous_chain_length", &self.previous_chain_length)
+            .field("skipped_message_keys_len", &self.skipped_message_keys.len())
             .finish()
     }
 }
@@ -82,6 +87,7 @@ impl RatchetState {
             send_message_number: 0,
             receive_message_number: 0,
             previous_chain_length: 0,
+            skipped_message_keys: crate::skipped_keys::SkippedKeyCache::new(),
         }
     }
 
@@ -135,6 +141,7 @@ impl RatchetState {
             send_message_number: 0,
             receive_message_number: 0,
             previous_chain_length: 0,
+            skipped_message_keys: crate::skipped_keys::SkippedKeyCache::new(),
         }
     }
 
@@ -181,6 +188,24 @@ impl RatchetState {
         out.extend_from_slice(&self.send_message_number.to_be_bytes());
         out.extend_from_slice(&self.receive_message_number.to_be_bytes());
         out.extend_from_slice(&self.previous_chain_length.to_be_bytes());
+
+        // Skipped-message-key cache (Task 10): a `u32` entry count,
+        // then each `(sender_ratchet_ecdh_public, message_number, key)`
+        // triple, in the cache's own FIFO insertion order -- a
+        // `HashMap`'s iteration order is not guaranteed stable across
+        // runs, so serializing straight from it would make round-trips
+        // non-reproducible (and unit-testable) even though the *set* of
+        // entries would still be correct. Iterating in insertion order
+        // instead makes `to_bytes` deterministic for a given cache
+        // state, which the round-trip test below relies on.
+        let entries: Vec<_> = self.skipped_message_keys.iter_in_insertion_order().collect();
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for ((sender_ratchet_ecdh_public, message_number), key) in entries {
+            out.extend_from_slice(&sender_ratchet_ecdh_public);
+            out.extend_from_slice(&message_number.to_be_bytes());
+            out.extend_from_slice(&**key);
+        }
+
         Zeroizing::new(out)
     }
 
@@ -264,6 +289,25 @@ impl RatchetState {
             cursor.take_array::<4>().map_err(|_| RatchetError::MalformedMessage)?,
         );
 
+        let skipped_key_count = u32::from_be_bytes(
+            cursor.take_array::<4>().map_err(|_| RatchetError::MalformedMessage)?,
+        );
+        let mut skipped_message_keys = crate::skipped_keys::SkippedKeyCache::new();
+        for _ in 0..skipped_key_count {
+            let sender_ratchet_ecdh_public = cursor
+                .take_array::<ECDH_PUBLIC_KEY_LEN>()
+                .map_err(|_| RatchetError::MalformedMessage)?;
+            let message_number = u32::from_be_bytes(
+                cursor.take_array::<4>().map_err(|_| RatchetError::MalformedMessage)?,
+            );
+            let key: Zeroizing<[u8; crate::kdf_chain::MESSAGE_KEY_LEN]> = Zeroizing::new(
+                cursor
+                    .take_array::<{ crate::kdf_chain::MESSAGE_KEY_LEN }>()
+                    .map_err(|_| RatchetError::MalformedMessage)?,
+            );
+            skipped_message_keys.insert(sender_ratchet_ecdh_public, message_number, key);
+        }
+
         Ok(Self {
             root_key,
             sending_chain,
@@ -275,6 +319,7 @@ impl RatchetState {
             send_message_number,
             receive_message_number,
             previous_chain_length,
+            skipped_message_keys,
         })
     }
 
@@ -301,6 +346,26 @@ impl RatchetState {
     /// generates a fresh self-ratchet keypair, and starts a new
     /// `sending_chain` toward the peer's newly announced public keys.
     pub(crate) fn dh_ratchet_step(&mut self, header: &RatchetHeader) -> Result<(), RatchetError> {
+        // Before overwriting the current receiving chain, derive and
+        // cache the message keys for any messages on it that were
+        // never received (design §5) -- otherwise a message that was
+        // in flight when the peer ratcheted forward would be silently
+        // stranded: once `receiving_chain` is replaced below, there is
+        // no way to derive that old chain's keys again.
+        if let Some(old_chain) = &mut self.receiving_chain {
+            let mut chain_key = old_chain.chain_key.clone();
+            while self.receive_message_number < header.previous_chain_length {
+                let (new_chain_key, message_key) = kdf_ck(&chain_key);
+                self.skipped_message_keys.insert(
+                    self.peer_ratchet_ecdh_public,
+                    self.receive_message_number,
+                    message_key,
+                );
+                chain_key = new_chain_key;
+                self.receive_message_number += 1;
+            }
+        }
+
         let kem_ciphertext = header.kem_ciphertext.ok_or(RatchetError::MalformedMessage)?;
 
         let ecdh_shared =
@@ -434,11 +499,61 @@ impl RatchetState {
             .as_mut()
             .ok_or(RatchetError::UnknownMessage)?; // dh_ratchet_step above always populates this when it runs; None here means a header we can't process
 
-        if message.header.message_number != self.receive_message_number {
-            // Task 10 handles this case (skipped-key cache); for now,
-            // an out-of-order message is an error rather than silently
-            // mishandled.
-            return Err(RatchetError::UnknownMessage);
+        if message.header.message_number < self.receive_message_number {
+            // Already-advanced-past message number: look it up in the
+            // skipped-key cache rather than the live chain (the live
+            // chain has already moved past this point).
+            let message_number = message.header.message_number;
+            let sender = self.peer_ratchet_ecdh_public;
+            let key = self
+                .skipped_message_keys
+                .take(sender, message_number)
+                .ok_or(RatchetError::UnknownMessage)?;
+            let nonce = [0u8; 12];
+            return match aegis_crypto::aead::decrypt(
+                aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
+                &key,
+                &nonce,
+                aad,
+                &message.ciphertext,
+            ) {
+                Ok(plaintext) => Ok(Zeroizing::new(plaintext)),
+                Err(_) => {
+                    // Re-insert rather than let `.take()` permanently
+                    // discard this key: a tampered/corrupted delivery
+                    // of this message must not also make a later,
+                    // correct retransmission of the same message
+                    // undecryptable. Mirrors the same "don't commit
+                    // state until the fallible step succeeds"
+                    // principle Task 9's review caught in the in-order
+                    // path (chain.chain_key advancing before the AEAD
+                    // call was known to succeed) -- applied here to
+                    // the skipped-key cache instead of the chain key.
+                    self.skipped_message_keys.insert(sender, message_number, key);
+                    Err(RatchetError::DecryptionFailed)
+                }
+            };
+        }
+
+        if message.header.message_number > self.receive_message_number {
+            // Message arrived ahead of the live chain: derive and cache
+            // every intervening key so those messages can still
+            // decrypt later, then fast-forward the chain in place to
+            // the requested message number.
+            let gap = message.header.message_number - self.receive_message_number;
+            if gap as usize > crate::skipped_keys::MAX_SKIP {
+                return Err(RatchetError::SkippedKeyLimitExceeded);
+            }
+            while self.receive_message_number < message.header.message_number {
+                let (new_chain_key, message_key) = kdf_ck(&chain.chain_key);
+                chain.chain_key = new_chain_key;
+                self.skipped_message_keys.insert(
+                    self.peer_ratchet_ecdh_public,
+                    self.receive_message_number,
+                    message_key,
+                );
+                self.receive_message_number += 1;
+            }
         }
 
         // Derive the next chain key and this message's key, but do NOT
@@ -872,5 +987,140 @@ mod tests {
         assert_eq!(second.header.message_number, 1);
         assert!(second.header.kem_ciphertext.is_none(), "same chain, no new ratchet step needed");
         assert_ne!(first.ciphertext, second.ciphertext);
+    }
+
+    #[test]
+    fn out_of_order_message_still_decrypts() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+        // Establish the receiving chain first via an in-order message.
+        // `RatchetHeader::kem_ciphertext` is present *only* on the
+        // first message of a newly started sending chain (design
+        // §4.3), and `decrypt`'s DH-ratchet-step trigger
+        // (`receiving_chain.is_none()`, design §4.2 step 1) fires
+        // unconditionally on whichever message a peer decrypts first
+        // -- so the very first message of a brand-new chain must be
+        // processed in order to bootstrap `receiving_chain` at all.
+        // Task 10's skip-cache handles reordering *within* an already
+        // established chain, which is what this test (and the others
+        // below) exercise from this point on.
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        let first = alice_state.encrypt(b"one", b"").unwrap();
+        let second = alice_state.encrypt(b"two", b"").unwrap();
+
+        // Bob receives "two" before "one".
+        let plaintext_two = bob_state.decrypt(&second, b"").unwrap();
+        assert_eq!(&*plaintext_two, b"two");
+        let plaintext_one = bob_state.decrypt(&first, b"").unwrap();
+        assert_eq!(&*plaintext_one, b"one");
+    }
+
+    #[test]
+    fn a_message_delivered_twice_fails_the_second_time() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let message = alice_state.encrypt(b"one", b"").unwrap();
+        assert!(bob_state.decrypt(&message, b"").is_ok());
+        assert_eq!(bob_state.decrypt(&message, b"").unwrap_err(), RatchetError::UnknownMessage);
+    }
+
+    #[test]
+    fn skip_gap_larger_than_max_skip_is_rejected() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+        // See `out_of_order_message_still_decrypts` for why the chain
+        // must be bootstrapped with an in-order message first.
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        for _ in 0..=crate::skipped_keys::MAX_SKIP {
+            alice_state.encrypt(b"filler", b"").unwrap();
+        }
+        let far_future = alice_state.encrypt(b"too far", b"").unwrap();
+        assert_eq!(
+            bob_state.decrypt(&far_future, b"").unwrap_err(),
+            RatchetError::SkippedKeyLimitExceeded,
+        );
+    }
+
+    #[test]
+    fn a_tampered_out_of_order_message_does_not_destroy_the_cached_key() {
+        // Regression test mirroring
+        // `decrypt_recovers_after_a_tampered_attempt_on_the_same_message`,
+        // but for the skipped-key (`<` branch) path instead of the
+        // in-order path: a failed decrypt of an out-of-order message
+        // must re-insert its key rather than let `.take()` permanently
+        // discard it, so a later correct retransmission of that exact
+        // message still decrypts.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        // See `out_of_order_message_still_decrypts` for why the chain
+        // must be bootstrapped with an in-order message first.
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        let first = alice_state.encrypt(b"one", b"").unwrap();
+        let second = alice_state.encrypt(b"two", b"").unwrap();
+
+        // Bob receives "two" first, populating the skipped-key cache
+        // with message "one"'s key.
+        bob_state.decrypt(&second, b"").unwrap();
+
+        // A tampered delivery of "one" must fail, but must NOT consume
+        // the cached key.
+        let mut tampered_first = first.clone();
+        tampered_first.ciphertext[0] ^= 0xFF;
+        assert_eq!(
+            bob_state.decrypt(&tampered_first, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+        );
+
+        // The real, untampered message "one" must still decrypt.
+        let plaintext_one = bob_state.decrypt(&first, b"").unwrap();
+        assert_eq!(&*plaintext_one, b"one");
+    }
+
+    #[test]
+    fn skipped_message_key_survives_to_bytes_from_bytes_round_trip() {
+        // Correction #2: `to_bytes`/`from_bytes` must serialize
+        // `skipped_message_keys`, not just the fields Task 6 originally
+        // covered -- otherwise a persisted-then-restored `RatchetState`
+        // would silently drop every cached out-of-order key, and a
+        // message that arrives late right around that persist/reload
+        // boundary would become permanently undecryptable (UnknownMessage)
+        // instead of just delayed.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        // See `out_of_order_message_still_decrypts` for why the chain
+        // must be bootstrapped with an in-order message first.
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        let first = alice_state.encrypt(b"one", b"").unwrap();
+        let second = alice_state.encrypt(b"two", b"").unwrap();
+
+        // Bob receives "two" before "one", caching message "one"'s key.
+        bob_state.decrypt(&second, b"").unwrap();
+        assert_eq!(bob_state.skipped_message_keys.len(), 1);
+
+        // Persist Bob's state (with the skipped key still cached).
+        let bytes = bob_state.to_bytes();
+
+        // Serializing an unchanged state twice must produce identical
+        // bytes -- proving the serialization is deterministic and not
+        // dependent on HashMap iteration order.
+        assert_eq!(bob_state.to_bytes(), bytes, "to_bytes must be deterministic across calls");
+
+        // Restore into a fresh state and confirm the cached key made
+        // the trip.
+        let mut restored_bob_state = RatchetState::from_bytes(&bytes).unwrap();
+        assert_eq!(restored_bob_state.skipped_message_keys.len(), 1);
+
+        // The restored state must still be able to decrypt the
+        // previously-skipped message using the round-tripped key.
+        let plaintext_one = restored_bob_state.decrypt(&first, b"").unwrap();
+        assert_eq!(&*plaintext_one, b"one");
+
+        // Re-serializing the restored (pre-consumption) state layout
+        // must round trip byte-for-byte too.
+        let re_restored = RatchetState::from_bytes(&bytes).unwrap();
+        assert_eq!(re_restored.to_bytes(), bytes, "round trip must be exact");
     }
 }
