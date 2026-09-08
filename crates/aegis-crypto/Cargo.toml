@@ -1,9 +1,12 @@
 [package]
 name = "aegis-crypto"
-# Overrides workspace.package's version rather than inheriting it: this
-# bump (README/LICENSE only, no code change) is specific to this crate,
-# and the other workspace members aren't published yet.
-version = "0.1.3"
+# Overrides workspace.package's version rather than inheriting it:
+# this crate is versioned independently since it's the only workspace
+# member published so far. 0.1.4 adds additive, non-breaking key-export
+# methods (Brainpool512SecretKey::to_bytes/from_bytes,
+# MlKem1024KeyPair::to_seed_bytes/from_seed_bytes) needed by
+# aegis-ratchet's RatchetState serialization.
+version = "0.1.4"
 edition.workspace = true
 description = "Hybrid post-quantum cryptographic primitives (ML-KEM-1024, ML-DSA-87, brainpoolP512r1, AEAD, Argon2id) for the AegisPQC messenger. NOT independently audited."
 license = "PolyForm-Noncommercial-1.0.0"
