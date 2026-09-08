@@ -984,7 +984,11 @@ pub fn initiate_x3dh(
         .try_into()
         .expect("ml_kem_encapsulate ciphertext is always KEM_CIPHERTEXT_LEN bytes");
 
-    let mut ikm = Vec::with_capacity(3 * 64 + 32 + 32);
+    // Zeroizing-wrapped: this Vec is the concatenated raw shared-secret
+    // IKM itself, not a derived output — every constituent DH/KEM
+    // secret is already Zeroizing on its own, but copying them into a
+    // plain Vec would leave that copy unwiped.
+    let mut ikm: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(3 * 64 + 32 + 32));
     ikm.extend_from_slice(&*dh1);
     ikm.extend_from_slice(&*dh2);
     ikm.extend_from_slice(&*dh3);
@@ -1168,7 +1172,12 @@ pub fn respond_to_x3dh(
     let dh3 = brainpool512_diffie_hellman(my_signed_pre_key_ecdh, &preamble.alice_ephemeral_ecdh_public)?;
     let kem_ss_signed = ml_kem_decapsulate(my_signed_pre_key_kem, &preamble.kem_ciphertext_signed)?;
 
-    let mut ikm = Vec::with_capacity(3 * 64 + 32 + 32);
+    // Zeroizing-wrapped: this Vec is the concatenated raw shared-secret
+    // IKM itself, not a derived output — every constituent DH/KEM
+    // secret is already Zeroizing on its own, but copying them into a
+    // plain Vec would leave that copy unwiped. (Fixed here after Task
+    // 4's review caught the identical bug in that task's sample code.)
+    let mut ikm: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(3 * 64 + 32 + 32));
     ikm.extend_from_slice(&*dh1);
     ikm.extend_from_slice(&*dh2);
     ikm.extend_from_slice(&*dh3);
