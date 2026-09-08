@@ -138,7 +138,7 @@ pub fn initiate_x3dh(
         .try_into()
         .expect("ml_kem_encapsulate ciphertext is always KEM_CIPHERTEXT_LEN bytes");
 
-    let mut ikm = Vec::with_capacity(3 * 64 + 32 + 32);
+    let mut ikm: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(3 * 64 + 32 + 32));
     ikm.extend_from_slice(&*dh1);
     ikm.extend_from_slice(&*dh2);
     ikm.extend_from_slice(&*dh3);
