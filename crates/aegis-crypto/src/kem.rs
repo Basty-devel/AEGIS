@@ -37,6 +37,7 @@ pub struct MlKem1024KeyPair {
     decapsulation_key: ml_kem::DecapsulationKey<MlKem1024>,
     #[zeroize(skip)]
     encapsulation_key: EncapsulationKey<MlKem1024>,
+    seed: Zeroizing<ml_kem::Seed>,
 }
 
 impl MlKem1024KeyPair {
@@ -50,16 +51,16 @@ impl MlKem1024KeyPair {
     /// would be strictly worse than aborting.
     pub fn generate() -> Self {
         // The seed is built directly in its final `Array` form and
-        // wiped afterwards; going via `[u8; 64].into()` would leave an
-        // un-zeroized copy of the full ML-KEM seed (which determines
-        // the decapsulation key) on the stack.
+        // retained (rather than zeroized after use) so it can later be
+        // exported via `to_seed_bytes` for callers that need to
+        // persist this keypair themselves.
         let mut seed = ml_kem::Seed::default();
         getrandom::fill(seed.as_mut_slice()).expect("OS RNG failure");
         let (decapsulation_key, encapsulation_key) = MlKem1024::from_seed(&seed);
-        seed.as_mut_slice().zeroize();
         Self {
             decapsulation_key,
             encapsulation_key,
+            seed: Zeroizing::new(seed),
         }
     }
 
@@ -68,6 +69,30 @@ impl MlKem1024KeyPair {
     /// [`ml_kem_encapsulate`].
     pub fn encapsulation_key_bytes(&self) -> Vec<u8> {
         self.encapsulation_key.to_bytes().to_vec()
+    }
+
+    /// The raw 64-byte seed this keypair was generated from, for
+    /// callers that need to persist this key themselves (e.g.
+    /// `aegis-ratchet`'s `RatchetState` serialization).
+    pub fn to_seed_bytes(&self) -> Zeroizing<[u8; 64]> {
+        let mut out = Zeroizing::new([0u8; 64]);
+        out.copy_from_slice(self.seed.as_slice());
+        out
+    }
+
+    /// Reconstruct a keypair from a seed produced by
+    /// [`Self::to_seed_bytes`]. Infallible: every 64-byte value is a
+    /// valid ML-KEM-1024 seed (FIPS 203's `from_seed` has no rejection
+    /// step, unlike brainpool512r1's scalar sampling).
+    pub fn from_seed_bytes(bytes: &[u8; 64]) -> Self {
+        let mut seed = ml_kem::Seed::default();
+        seed.as_mut_slice().copy_from_slice(bytes);
+        let (decapsulation_key, encapsulation_key) = MlKem1024::from_seed(&seed);
+        Self {
+            decapsulation_key,
+            encapsulation_key,
+            seed: Zeroizing::new(seed),
+        }
     }
 }
 
@@ -232,6 +257,18 @@ mod tests {
         );
         let (ciphertext, _) = ml_kem_encapsulate(&keypair.encapsulation_key_bytes()).unwrap();
         assert_eq!(ciphertext.len(), ML_KEM_1024_CIPHERTEXT_LEN);
+    }
+
+    #[test]
+    fn keypair_round_trips_through_seed_bytes() {
+        let original = MlKem1024KeyPair::generate();
+        let seed = original.to_seed_bytes();
+        let restored = MlKem1024KeyPair::from_seed_bytes(&seed);
+        assert_eq!(
+            original.encapsulation_key_bytes(),
+            restored.encapsulation_key_bytes(),
+            "reconstructing from the same seed must give the same public key",
+        );
     }
 
     #[test]
