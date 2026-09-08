@@ -8,5 +8,6 @@
 
 pub mod error;
 pub mod kdf_chain;
+pub mod prekey;
 
 pub use error::RatchetError;

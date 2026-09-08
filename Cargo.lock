@@ -56,6 +56,15 @@ version = "0.1.0"
 [[package]]
 name = "aegis-ratchet"
 version = "0.1.0"
+dependencies = [
+ "aegis-crypto",
+ "getrandom",
+ "hex",
+ "hkdf",
+ "hmac",
+ "sha2",
+ "zeroize",
+]
 
 [[package]]
 name = "aegis-vault"
