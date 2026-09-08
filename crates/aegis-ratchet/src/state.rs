@@ -417,6 +417,47 @@ impl RatchetState {
 
         Ok(RatchetMessage { header, ciphertext })
     }
+
+    /// Decrypt and authenticate `message` (design §4.2 in-order case;
+    /// Task 10 adds out-of-order/skipped-key handling on top of this).
+    /// Performs a DH ratchet step first if `message.header` carries a
+    /// peer ratchet public key not yet seen.
+    pub fn decrypt(&mut self, message: &RatchetMessage, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, RatchetError> {
+        if message.header.ratchet_ecdh_public != self.peer_ratchet_ecdh_public
+            || self.receiving_chain.is_none()
+        {
+            self.dh_ratchet_step(&message.header)?;
+        }
+
+        let chain = self
+            .receiving_chain
+            .as_mut()
+            .ok_or(RatchetError::UnknownMessage)?; // dh_ratchet_step above always populates this when it runs; None here means a header we can't process
+
+        if message.header.message_number != self.receive_message_number {
+            // Task 10 handles this case (skipped-key cache); for now,
+            // an out-of-order message is an error rather than silently
+            // mishandled.
+            return Err(RatchetError::UnknownMessage);
+        }
+
+        let (new_chain_key, message_key) = kdf_ck(&chain.chain_key);
+        chain.chain_key = new_chain_key;
+
+        let nonce = [0u8; 12]; // matches encrypt_message's nonce construction -- see Task 8 notes
+        let plaintext = aegis_crypto::aead::decrypt(
+            aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
+            &message_key,
+            &nonce,
+            aad,
+            &message.ciphertext,
+        )
+        .map_err(|_| RatchetError::DecryptionFailed)?;
+
+        self.receive_message_number += 1;
+
+        Ok(Zeroizing::new(plaintext))
+    }
 }
 
 /// One ratchet message's header (design §4.3). `ratchet_kem_public` is
@@ -521,6 +562,100 @@ mod tests {
     use crate::kdf_chain::ROOT_KEY_LEN;
     use aegis_crypto::ecdh::Brainpool512SecretKey;
     use aegis_crypto::kem::MlKem1024KeyPair;
+
+    /// Build a fully-handshaked two-party session (Alice as X3DH
+    /// initiator, Bob as X3DH responder) for tests that need a real
+    /// `RatchetState` on both sides rather than one side's initial
+    /// state against synthetic peer keys. Reused by Task 10/11's tests.
+    fn two_party_session() -> (RatchetState, RatchetState) {
+        use crate::prekey::{generate_signed_pre_key, IdentityKeyPair, PreKeyBundle};
+        use crate::x3dh::{initiate_x3dh, respond_to_x3dh};
+        use aegis_crypto::version::ProtocolVersion;
+
+        let alice_identity = IdentityKeyPair::generate();
+        let bob_identity = IdentityKeyPair::generate();
+        let (signed_pre_key, bob_spk_ecdh, bob_spk_kem) = generate_signed_pre_key(&bob_identity);
+        let bundle = PreKeyBundle {
+            identity: bob_identity.public_keys(),
+            signed_pre_key,
+            one_time_pre_key: None,
+        };
+
+        let (alice_root_key, preamble, _) =
+            initiate_x3dh(&alice_identity, &bundle, ProtocolVersion::V1).unwrap();
+        let alice_state = RatchetState::from_x3dh_initiator(
+            *alice_root_key,
+            bundle.signed_pre_key.ecdh_public,
+            bundle.signed_pre_key.kem_encapsulation_key,
+        );
+
+        let bob_root_key =
+            respond_to_x3dh(&bob_identity, &bob_spk_ecdh, &bob_spk_kem, None, &preamble).unwrap();
+        let bob_state = RatchetState::from_x3dh_responder(
+            *bob_root_key,
+            preamble.alice_ephemeral_ecdh_public,
+            bob_spk_ecdh,
+            bob_spk_kem,
+        );
+
+        (alice_state, bob_state)
+    }
+
+    #[test]
+    fn decrypt_recovers_what_encrypt_produced_across_the_x3dh_handoff() {
+        use crate::prekey::{generate_signed_pre_key, IdentityKeyPair, PreKeyBundle};
+        use crate::x3dh::{initiate_x3dh, respond_to_x3dh};
+        use aegis_crypto::version::ProtocolVersion;
+
+        let alice_identity = IdentityKeyPair::generate();
+        let bob_identity = IdentityKeyPair::generate();
+        let (signed_pre_key, bob_spk_ecdh, bob_spk_kem) = generate_signed_pre_key(&bob_identity);
+        let bundle = PreKeyBundle {
+            identity: bob_identity.public_keys(),
+            signed_pre_key,
+            one_time_pre_key: None,
+        };
+
+        let (alice_root_key, preamble, _alice_ephemeral) =
+            initiate_x3dh(&alice_identity, &bundle, ProtocolVersion::V1).unwrap();
+        let mut alice_state = RatchetState::from_x3dh_initiator(
+            *alice_root_key,
+            bundle.signed_pre_key.ecdh_public,
+            bundle.signed_pre_key.kem_encapsulation_key,
+        );
+
+        let bob_root_key =
+            respond_to_x3dh(&bob_identity, &bob_spk_ecdh, &bob_spk_kem, None, &preamble).unwrap();
+        let mut bob_state = RatchetState::from_x3dh_responder(
+            *bob_root_key,
+            preamble.alice_ephemeral_ecdh_public,
+            bob_spk_ecdh,
+            bob_spk_kem,
+        );
+
+        let message = alice_state.encrypt(b"hello bob", b"").unwrap();
+        let plaintext = bob_state.decrypt(&message, b"").unwrap();
+        assert_eq!(&*plaintext, b"hello bob");
+    }
+
+    #[test]
+    fn decrypt_rejects_tampered_ciphertext_without_panicking() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let mut message = alice_state.encrypt(b"hello bob", b"").unwrap();
+        message.ciphertext[0] ^= 0xFF;
+
+        assert_eq!(bob_state.decrypt(&message, b"").unwrap_err(), RatchetError::DecryptionFailed);
+    }
+
+    #[test]
+    fn decrypt_rejects_wrong_aad_without_panicking() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let message = alice_state.encrypt(b"hello bob", b"correct-aad").unwrap();
+        assert_eq!(
+            bob_state.decrypt(&message, b"wrong-aad").unwrap_err(),
+            RatchetError::DecryptionFailed,
+        );
+    }
 
     #[test]
     fn initiator_state_has_no_sending_or_receiving_chain_yet() {
