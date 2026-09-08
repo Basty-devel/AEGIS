@@ -75,6 +75,10 @@ pub enum CryptoError {
         /// Byte length actually supplied.
         len: usize,
     },
+
+    /// Bytes previously produced by [`crate::ecdh::Brainpool512SecretKey::to_bytes`]
+    /// did not decode back to a valid brainpool512r1 private scalar.
+    InvalidSecretKeyBytes,
 }
 
 impl fmt::Display for CryptoError {
@@ -102,6 +106,9 @@ impl fmt::Display for CryptoError {
                 f,
                 "KDF info field `{field}` is {len} bytes, which exceeds its u16 length prefix"
             ),
+            Self::InvalidSecretKeyBytes => {
+                f.write_str("brainpool512r1 secret key bytes did not decode to a valid scalar")
+            }
         }
     }
 }

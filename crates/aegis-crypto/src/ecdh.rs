@@ -99,18 +99,13 @@ impl Brainpool512SecretKey {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidPeerPublicKey`] if `bytes` is not
-    /// a valid brainpool512r1 scalar. (Reusing that variant rather
-    /// than adding a new one: both mean "not a valid point/scalar
-    /// encoding for this curve," and `CryptoError` is
-    /// `#[non_exhaustive]` specifically so callers don't need to
-    /// exhaustively match every variant -- see `error.rs`'s own
-    /// module doc.)
+    /// Returns [`CryptoError::InvalidSecretKeyBytes`] if `bytes` is not
+    /// a valid brainpool512r1 scalar.
     pub fn from_bytes(bytes: &[u8; 64]) -> Result<Self, CryptoError> {
         let field_bytes = elliptic_curve::FieldBytes::<BrainpoolP512r1>::from(*bytes);
         SecretKey::<BrainpoolP512r1>::from_bytes(&field_bytes)
             .map(Self)
-            .map_err(|_| CryptoError::InvalidPeerPublicKey)
+            .map_err(|_| CryptoError::InvalidSecretKeyBytes)
     }
 }
 
@@ -297,6 +292,24 @@ mod tests {
         let original_shared = brainpool512_diffie_hellman(&original, &peer.public_key_bytes()).unwrap();
         let restored_shared = brainpool512_diffie_hellman(&restored, &peer.public_key_bytes()).unwrap();
         assert_eq!(*original_shared, *restored_shared);
+    }
+
+    #[test]
+    fn from_bytes_rejects_a_scalar_that_does_not_decode_without_panicking() {
+        // The all-zero scalar is never a valid private key for any
+        // curve (it would make the public key the point at infinity),
+        // so `elliptic_curve::SecretKey::from_bytes` rejects it
+        // regardless of curve-specific order bounds -- the safest
+        // universally-invalid input to use here.
+        let zero_bytes = [0u8; 64];
+        match Brainpool512SecretKey::from_bytes(&zero_bytes) {
+            Err(err) => assert_eq!(
+                err,
+                CryptoError::InvalidSecretKeyBytes,
+                "an all-zero scalar must be rejected with InvalidSecretKeyBytes, not panic",
+            ),
+            Ok(_) => panic!("an all-zero scalar must not decode to a valid secret key"),
+        }
     }
 
     #[test]
