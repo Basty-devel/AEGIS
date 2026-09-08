@@ -12,7 +12,7 @@ use crate::prekey::{
 };
 use aegis_crypto::ecdh::{brainpool512_diffie_hellman, Brainpool512SecretKey};
 use aegis_crypto::kdf::derive_key;
-use aegis_crypto::kem::ml_kem_encapsulate;
+use aegis_crypto::kem::{ml_kem_decapsulate, ml_kem_encapsulate, MlKem1024KeyPair};
 use aegis_crypto::version::ProtocolVersion;
 use zeroize::Zeroizing;
 
@@ -187,11 +187,74 @@ pub fn initiate_x3dh(
     Ok((root_key, preamble, alice_ephemeral_ecdh_public))
 }
 
+/// Compute Bob's X3DH shared secret from Alice's `preamble`, using the
+/// private keypairs matching whichever pre-keys the preamble says were
+/// used. Must derive the identical root key `initiate_x3dh` derived
+/// for the same handshake (verified by this task's agreement tests).
+///
+/// # Errors
+///
+/// Propagates [`RatchetError::Crypto`] from malformed key material.
+/// Does not itself re-verify a bundle signature (Bob is answering his
+/// own published bundle, not re-checking it) — signature verification
+/// happens only on the initiating side, against the bundle it received
+/// (Task 4).
+pub fn respond_to_x3dh(
+    my_identity: &IdentityKeyPair,
+    my_signed_pre_key_ecdh: &Brainpool512SecretKey,
+    my_signed_pre_key_kem: &MlKem1024KeyPair,
+    my_one_time_pre_key: Option<(&Brainpool512SecretKey, &MlKem1024KeyPair)>,
+    preamble: &X3DHPreamble,
+) -> Result<Zeroizing<[u8; ROOT_KEY_LEN]>, RatchetError> {
+    let dh1 = brainpool512_diffie_hellman(my_signed_pre_key_ecdh, &preamble.alice_identity_ecdh_public)?;
+    let dh2 = brainpool512_diffie_hellman(&my_identity.ecdh, &preamble.alice_ephemeral_ecdh_public)?;
+    let dh3 = brainpool512_diffie_hellman(my_signed_pre_key_ecdh, &preamble.alice_ephemeral_ecdh_public)?;
+    let kem_ss_signed = ml_kem_decapsulate(my_signed_pre_key_kem, &preamble.kem_ciphertext_signed)?;
+
+    // Zeroizing-wrapped: this Vec is the concatenated raw shared-secret
+    // IKM itself, not a derived output — every constituent DH/KEM
+    // secret is already Zeroizing on its own, but copying them into a
+    // plain Vec would leave that copy unwiped. (Fixed here after Task
+    // 4's review caught the identical bug in that task's sample code.)
+    let mut ikm: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(3 * 64 + 32 + 32));
+    ikm.extend_from_slice(&*dh1);
+    ikm.extend_from_slice(&*dh2);
+    ikm.extend_from_slice(&*dh3);
+    ikm.extend_from_slice(&*kem_ss_signed);
+
+    if let (Some(ct), Some((_otpk_ecdh, otpk_kem))) =
+        (&preamble.kem_ciphertext_onetime, my_one_time_pre_key)
+    {
+        let ss = ml_kem_decapsulate(otpk_kem, ct)?;
+        ikm.extend_from_slice(&*ss);
+    }
+
+    let my_identity_pub = my_identity.public_keys();
+    let mut bob_identity_bytes = Vec::with_capacity(ED25519_PUBLIC_KEY_LEN + ML_DSA_87_PUBLIC_KEY_LEN);
+    bob_identity_bytes.extend_from_slice(&my_identity_pub.verifying.ed25519);
+    bob_identity_bytes.extend_from_slice(&my_identity_pub.verifying.ml_dsa87);
+    let mut alice_identity_bytes = Vec::with_capacity(ED25519_PUBLIC_KEY_LEN + ML_DSA_87_PUBLIC_KEY_LEN);
+    alice_identity_bytes.extend_from_slice(&preamble.alice_identity.ed25519);
+    alice_identity_bytes.extend_from_slice(&preamble.alice_identity.ml_dsa87);
+
+    let mut root_key = Zeroizing::new([0u8; ROOT_KEY_LEN]);
+    derive_key(
+        &ikm,
+        X3DH_DOMAIN_LABEL,
+        preamble.protocol_version,
+        &alice_identity_bytes,
+        &bob_identity_bytes,
+        root_key.as_mut(),
+    )?;
+
+    Ok(root_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kdf_chain;
-    use crate::prekey::{generate_signed_pre_key, IdentityKeyPair, PreKeyBundle};
+    use crate::prekey::{generate_one_time_pre_key, generate_signed_pre_key, IdentityKeyPair, PreKeyBundle};
     use aegis_crypto::version::ProtocolVersion;
 
     fn bob_bundle_and_identity() -> (PreKeyBundle, IdentityKeyPair) {
@@ -240,5 +303,74 @@ mod tests {
             initiate_x3dh(&alice, &bob_bundle, ProtocolVersion::V1).unwrap_err(),
             RatchetError::InvalidBundleSignature,
         );
+    }
+
+    #[test]
+    fn both_sides_derive_the_same_root_key() {
+        let alice = IdentityKeyPair::generate();
+        let bob = IdentityKeyPair::generate();
+        let (signed_pre_key, bob_spk_ecdh, bob_spk_kem) = generate_signed_pre_key(&bob);
+        let bundle = PreKeyBundle {
+            identity: bob.public_keys(),
+            signed_pre_key,
+            one_time_pre_key: None,
+        };
+
+        let (alice_root_key, preamble, _alice_ephemeral) =
+            initiate_x3dh(&alice, &bundle, ProtocolVersion::V1).unwrap();
+
+        let bob_root_key =
+            respond_to_x3dh(&bob, &bob_spk_ecdh, &bob_spk_kem, None, &preamble).unwrap();
+
+        assert_eq!(*alice_root_key, *bob_root_key);
+    }
+
+    #[test]
+    fn both_sides_agree_when_a_one_time_pre_key_is_used() {
+        let alice = IdentityKeyPair::generate();
+        let bob = IdentityKeyPair::generate();
+        let (signed_pre_key, bob_spk_ecdh, bob_spk_kem) = generate_signed_pre_key(&bob);
+        let (one_time_pre_key, bob_otpk_ecdh, bob_otpk_kem) = generate_one_time_pre_key(1);
+        let bundle = PreKeyBundle {
+            identity: bob.public_keys(),
+            signed_pre_key,
+            one_time_pre_key: Some(one_time_pre_key),
+        };
+
+        let (alice_root_key, preamble, _) = initiate_x3dh(&alice, &bundle, ProtocolVersion::V1).unwrap();
+        assert!(preamble.used_one_time_pre_key_id.is_some());
+
+        let bob_root_key = respond_to_x3dh(
+            &bob,
+            &bob_spk_ecdh,
+            &bob_spk_kem,
+            Some((&bob_otpk_ecdh, &bob_otpk_kem)),
+            &preamble,
+        )
+        .unwrap();
+
+        assert_eq!(*alice_root_key, *bob_root_key);
+    }
+
+    #[test]
+    fn a_third_party_derives_a_different_root_key() {
+        let alice = IdentityKeyPair::generate();
+        let bob = IdentityKeyPair::generate();
+        let mallory = IdentityKeyPair::generate();
+        let (signed_pre_key, bob_spk_ecdh, bob_spk_kem) = generate_signed_pre_key(&bob);
+        let bundle = PreKeyBundle {
+            identity: bob.public_keys(),
+            signed_pre_key,
+            one_time_pre_key: None,
+        };
+
+        let (alice_root_key, _preamble, _) = initiate_x3dh(&alice, &bundle, ProtocolVersion::V1).unwrap();
+        let (_mallory_root_key, mallory_preamble, _) =
+            initiate_x3dh(&mallory, &bundle, ProtocolVersion::V1).unwrap();
+
+        let bob_root_key_from_mallory =
+            respond_to_x3dh(&bob, &bob_spk_ecdh, &bob_spk_kem, None, &mallory_preamble).unwrap();
+
+        assert_ne!(*alice_root_key, *bob_root_key_from_mallory);
     }
 }
