@@ -441,8 +441,15 @@ impl RatchetState {
             return Err(RatchetError::UnknownMessage);
         }
 
+        // Derive the next chain key and this message's key, but do NOT
+        // commit `chain.chain_key` yet: the AEAD call below is fallible
+        // (tampered ciphertext, wrong AAD), and if it fails we must
+        // leave the chain key and receive_message_number exactly as
+        // they were, so a later correct retransmission of this same
+        // message can still be decrypted. Committing the advance here
+        // unconditionally would strand the chain key one position ahead
+        // of the counter on failure, permanently breaking recovery.
         let (new_chain_key, message_key) = kdf_ck(&chain.chain_key);
-        chain.chain_key = new_chain_key;
 
         let nonce = [0u8; 12]; // matches encrypt_message's nonce construction -- see Task 8 notes
         let plaintext = aegis_crypto::aead::decrypt(
@@ -454,6 +461,8 @@ impl RatchetState {
         )
         .map_err(|_| RatchetError::DecryptionFailed)?;
 
+        // Only now, after decrypt succeeded, commit the chain advance.
+        chain.chain_key = new_chain_key;
         self.receive_message_number += 1;
 
         Ok(Zeroizing::new(plaintext))
@@ -645,6 +654,30 @@ mod tests {
         message.ciphertext[0] ^= 0xFF;
 
         assert_eq!(bob_state.decrypt(&message, b"").unwrap_err(), RatchetError::DecryptionFailed);
+    }
+
+    #[test]
+    fn decrypt_recovers_after_a_tampered_attempt_on_the_same_message() {
+        // Regression test for the chain-key-advances-before-success bug:
+        // a failed decrypt (tampered ciphertext) must NOT advance
+        // receiving_chain's chain key or receive_message_number, so a
+        // later retransmission of the *original, untampered* message at
+        // the same message number can still be decrypted correctly.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let message = alice_state.encrypt(b"hello bob", b"").unwrap();
+
+        let mut tampered = message.clone();
+        tampered.ciphertext[0] ^= 0xFF;
+        assert_eq!(
+            bob_state.decrypt(&tampered, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+        );
+
+        // The real, untampered message at the same message number must
+        // still decrypt successfully -- proving the chain key and
+        // receive counter were left untouched by the failed attempt.
+        let plaintext = bob_state.decrypt(&message, b"").unwrap();
+        assert_eq!(&*plaintext, b"hello bob");
     }
 
     #[test]
