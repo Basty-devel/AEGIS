@@ -2413,20 +2413,36 @@ Replace `decrypt`'s message-number check (Task 9) — the block that currently r
 
 ```rust
         if message.header.message_number < self.receive_message_number {
+            let message_number = message.header.message_number;
+            let sender = self.peer_ratchet_ecdh_public;
             let key = self
                 .skipped_message_keys
-                .take(self.peer_ratchet_ecdh_public, message.header.message_number)
+                .take(sender, message_number)
                 .ok_or(RatchetError::UnknownMessage)?;
             let nonce = [0u8; 12];
-            let plaintext = aegis_crypto::aead::decrypt(
+            match aegis_crypto::aead::decrypt(
                 aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
-                key.as_ref(),
+                &key,
                 &nonce,
                 aad,
                 &message.ciphertext,
-            )
-            .map_err(|_| RatchetError::DecryptionFailed)?;
-            return Ok(Zeroizing::new(plaintext));
+            ) {
+                Ok(plaintext) => return Ok(Zeroizing::new(plaintext)),
+                Err(_) => {
+                    // Re-insert rather than let `.take()` permanently
+                    // discard this key: a tampered/corrupted delivery
+                    // of this message must not also make a later,
+                    // correct retransmission of the same message
+                    // undecryptable. Mirrors the same "don't commit
+                    // state until the fallible step succeeds"
+                    // principle Task 9's review caught in the in-order
+                    // path (chain.chain_key advancing before the AEAD
+                    // call was known to succeed) -- applied here to
+                    // the skipped-key cache instead of the chain key.
+                    self.skipped_message_keys.insert(sender, message_number, key);
+                    return Err(RatchetError::DecryptionFailed);
+                }
+            }
         }
 
         if message.header.message_number > self.receive_message_number {
