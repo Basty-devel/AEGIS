@@ -315,3 +315,109 @@ published test vectors. Correctness rests on:
 - **Zeroization**: message keys, chain keys, and ephemeral ratchet
   private keys are gone (checked via the same technique `aegis-crypto`'s
   existing zeroize tests use) after they go out of scope.
+
+---
+
+## 8. Final-Review Corrections (2026-09-09)
+
+The final whole-branch review of the Phase 1 implementation found four
+issues that change what this design *requires*, not merely how it was
+coded. They are recorded here so the spec and the shipped crate agree.
+Findings I2–I8 and M1–M9 from the same review are parked, not fixed —
+see the SDD ledger's "Final whole-branch review" ruling.
+
+### C1 — The message header is authenticated as associated data
+
+§4.1 step 3 already said the header must be "also authenticated as
+associated data"; the implementation passed only the caller's `aad`.
+That left `message_number`, `previous_chain_length` and
+`ratchet_kem_public` malleable in flight — and all three steer the
+receiver's state machine before its AEAD tag is ever checked.
+
+**Ruling:** the requirement stands and is now normative about the
+encoding. The associated data is
+
+```
+u64_be(len(aad)) || aad || u64_be(len(header_bytes)) || header_bytes
+```
+
+where `header_bytes` is `RatchetHeader::to_bytes()` (§4.3). The length
+framing is required, not incidental: plain concatenation is not
+injective over `(aad, header)` pairs, so an attacker could shift bytes
+across the boundary and produce identical associated data for different
+inputs.
+
+### C2 — `decrypt_message` is transactional
+
+§4.2 listed its steps in order but never said when they become visible
+in `state`. The implementation applied the §4.2 step 1 DH ratchet step
+(and the step-3 catch-up derivations, and the chain advance)
+immediately, before the step-4 AEAD call that can reject the message.
+
+This is unsafe specifically because ML-KEM has no decapsulation error:
+FIPS 203 mandates *implicit rejection*, so a wrong or replayed
+ciphertext yields an unpredictable shared secret rather than a failure.
+An ordinary duplicated packet — no attacker needed — therefore produced
+a garbage root key and receiving chain, committed it, and killed the
+session in both directions, surfacing later on an unrelated legitimate
+message.
+
+**Ruling:** §4.2 gains a normative transactional requirement.
+
+> **No field of `state` may change unless `decrypt_message` returns
+> `Ok`.** Steps 1–3 compute into local values only; a single commit
+> point after step 4's successful authentication applies all of them.
+> This covers the DH ratchet step, the skipped-key catch-up
+> derivations, the chain-key advance, the receive counter, and the
+> consumption of a cached skipped key.
+
+Consequences for §5: a skipped-key cache lookup must not consume the
+entry (`peek`), because the key may still fail to authenticate the
+message; the entry is removed only after it has successfully done so.
+Remove-then-reinsert-on-failure is not equivalent — it silently moves
+the entry to the back of the FIFO eviction order.
+
+### C3 — The identity ECDH key is bound to the signing identity
+
+§2.1's `IdentityKeys` carried a dual verifying key and a long-term ECDH
+public key with nothing tying them together. X3DH's implicit
+authentication lives entirely in the DH1/DH2 legs, which use
+`ecdh_public`, while the only thing a peer can *name* an identity by is
+`verifying`. §2.2's KDF `info` bound only the verifying keys.
+`respond_to_x3dh` verified nothing at all about the initiator. Mallory
+could therefore hand Bob a preamble carrying Alice's real verifying key
+alongside Mallory's own DH material, and Bob would complete the
+handshake believing he was talking to Alice.
+
+**Ruling:** two additions, both required.
+
+1. **Self-signature.** `IdentityKeyPair::generate` signs its own
+   `ecdh_public` under its `DualKeyPair`, and `IdentityKeys` carries
+   that signature. Both `initiate_x3dh` and `respond_to_x3dh` verify it
+   *before* the key is used for any DH computation; failure is
+   `RatchetError::InvalidBundleSignature`. The signing input is
+   domain-separated (`AEGIS-IDENTITY-ECDH-BINDING-v1`), and the
+   pre-existing signed-pre-key input gains its own label
+   (`AEGIS-SIGNED-PRE-KEY-v1`) so the two message spaces are disjoint.
+2. **Transcript binding.** §2.2's `derive_key` `info` now covers each
+   party's `ecdh_public` in addition to their verifying keys, as
+   `ed25519 || ml_dsa87 || ecdh_public` (32 + 2592 + 129 = 2753 fixed
+   bytes, so the concatenation is injective on its own).
+
+Both `PreKeyBundle` and `X3DHPreamble` wire formats grow the signature
+field; §2.1's and §2.3's encodings change accordingly.
+
+### I1 — A responder that cannot yet send says so
+
+§3 left `peer_ratchet_kem_public` as an all-zero placeholder on the
+X3DH responder until his first successful decrypt, on the assumption it
+is "overwritten before it is ever used". An application that lets the
+responder speak first breaks that assumption, and all-zero bytes pass
+ML-KEM's FIPS 203 modulus check — so encapsulation silently *succeeded*
+against a key nobody holds.
+
+**Ruling:** `peer_ratchet_kem_public` is `Option<[u8; 1568]>`. The
+sending-chain start returns a new `RatchetError::NotReadyToSend` when
+it is `None`. `RatchetState`'s serialization carries a presence byte
+for it, matching the convention already used for
+`RatchetHeader.kem_ciphertext` and `PreKeyBundle.one_time_pre_key`.

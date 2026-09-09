@@ -2684,3 +2684,121 @@ git commit -m "aegis-ratchet: end-to-end conversation tests (reordering, ratchet
 - **Task 6's serialization gap is resolved**: extend `aegis-crypto` with additive export methods (Steps 3a-3c), not seed-based reconstruction duplicated inside `aegis-ratchet` — decided by your human partner, concrete code included inline in that task.
 - **Spec coverage**: design §2 (X3DH) → Tasks 3-5; §3 items 1-3 (ratchet, KDF chains, PCS via zeroization) → Tasks 2, 6-9; §4.1-4.2 (encrypt/decrypt) → Tasks 8-9; §4.3 (wire format) → Task 6; §5 (skipped-key cache) → Task 10; §6 (error handling) → Task 1, threaded through every task; §7 (testing strategy) → Task 11 plus the per-task unit tests throughout. No section of the approved design is without a task.
 - **Type consistency checked**: `RatchetState`/`RatchetHeader`/`RatchetMessage` field names and the `encrypt`/`decrypt` method signatures are identical everywhere they're used across Tasks 6-11 (verified while writing, not left to a final pass) — in particular, `previous_chain_length` flows from `dh_ratchet_step` through to the header `start_sending_chain`/`encrypt` produce, exactly as design §3.2/§4.3 specify.
+
+---
+
+## Final-Review Fix Wave (2026-09-09)
+
+Applied after Task 11, against the whole branch. Scope is exactly the
+four findings the reviewer's own Assessment said must land (C1, C2, C3,
+I1); I2–I8 and M1–M9 are parked per the ledger's ruling. The normative
+statements of each correction live in design §8 — this section records
+what changed in the code the tasks above produced.
+
+### C1 — Header authenticated as AEAD associated data
+
+Task 8's `encrypt` and Task 9's `decrypt` passed the caller's `aad`
+straight through, dropping design §4.1's "and the message header also
+authenticated as associated data" clause.
+
+**Change:** new private `RatchetState::aead_associated_data(caller_aad,
+header)` builds `u64_be(len) || bytes` for each part; both `encrypt`
+and `decrypt` use it in place of the bare `aad`. In `encrypt` it is
+built *after* `header.message_number` is assigned — the header
+authenticated must be byte-identical to the one transmitted.
+
+**Regression tests** (`state.rs`):
+`tampering_with_the_header_message_number_fails_authentication`,
+`tampering_with_the_header_previous_chain_length_fails_authentication`,
+`tampering_with_the_header_ratchet_kem_public_fails_authentication`,
+`every_single_bit_flip_in_a_header_is_detected`,
+`the_caller_aad_and_the_header_cannot_be_shifted_across_their_boundary`.
+
+### C2 — Transactional `decrypt`
+
+Task 7's `dh_ratchet_step(&mut self)` mutated the session and returned
+`()`. Task 10's catch-up loop inserted into `skipped_message_keys` and
+advanced `receive_message_number` in place. Both happened before the
+AEAD call that can reject the message.
+
+**Change:** `dh_ratchet_step` is split into
+
+- `plan_dh_ratchet_step(&self) -> Result<PendingRatchetStep, _>` —
+  takes `&self`, so it *cannot* mutate; parks every prospective field
+  write, plus the superseded chain's skipped keys, in the new
+  `PendingRatchetStep` struct.
+- `commit_dh_ratchet_step(&mut self, step)` — the only place those
+  field writes happen.
+
+`decrypt` then computes the whole message path into locals (a cloned
+chain key, a local receive counter, a local `newly_skipped` buffer) and
+applies everything past one clearly marked commit point after the AEAD
+call succeeds. The skipped-key path uses `peek(..).cloned()` and calls
+`remove` only after the cached key has authenticated the message.
+
+`SkippedKeyCache::take` is accordingly replaced by the
+`peek`/`remove` pair (`skipped_keys.rs`), with
+`iter_in_insertion_order` added so `to_bytes` stays deterministic.
+
+**Regression tests** (`state.rs`):
+`a_replayed_message_that_triggers_a_ratchet_step_does_not_corrupt_the_session`
+(the empirically-reproduced failure, end to end, no attacker),
+`a_forged_chain_opening_message_does_not_corrupt_the_session`,
+`a_failed_out_of_order_decrypt_caches_no_keys`, plus the
+plan/commit split asserted directly in
+`dh_ratchet_step_updates_receiving_chain_from_a_new_peer_header`. Each
+uses `to_bytes()` before/after as a complete structural assertion that
+*no* field changed. `skipped_keys.rs` adds
+`peek_does_not_consume_the_entry`.
+
+### C3 — Identity ECDH ↔ signing identity binding
+
+**Change (`prekey.rs`):** `IdentityKeyPair` gains
+`ecdh_public_signature`, computed once in `generate` (not per
+`public_keys()` call — ML-DSA-87 signing is randomized, so re-signing
+would make `public_keys()` non-deterministic). `IdentityKeys` carries
+it; new `verify_identity_ecdh_binding` checks it. Both signing inputs
+gain domain-separation labels. `PreKeyBundle`'s wire format grows the
+field.
+
+**Change (`x3dh.rs`):** `initiate_x3dh` verifies the bundle's identity
+binding before trusting `verifying` for the signed-pre-key check or
+`ecdh_public` for DH. `respond_to_x3dh` — which previously verified
+nothing about the initiator — verifies the preamble's binding before
+any DH leg consumes `alice_identity_ecdh_public`. `X3DHPreamble` grows
+`alice_identity_ecdh_signature`. New `identity_transcript_bytes`
+replaces the two open-coded verifying-key-only concatenations feeding
+`derive_key`'s `info`.
+
+**Regression tests:** `prekey.rs` —
+`identity_ecdh_binding_verifies_for_a_freshly_generated_identity`,
+`identity_ecdh_binding_rejects_a_swapped_ecdh_key`,
+`identity_ecdh_binding_rejects_a_tampered_signature`,
+`public_keys_returns_the_same_binding_signature_every_call`. `x3dh.rs` —
+`initiate_rejects_a_bundle_whose_identity_ecdh_key_is_not_bound`,
+`responder_rejects_a_preamble_claiming_someone_elses_identity` (the
+actual impersonation attack),
+`a_preamble_replaying_a_victims_bound_identity_diverges_on_the_root_key`,
+`root_key_is_bound_to_the_identity_ecdh_keys_not_just_the_verifying_keys`,
+`a_full_handshake_agrees_only_when_both_identity_transcripts_match`.
+
+### I1 — `NotReadyToSend`
+
+**Change:** `RatchetState.peer_ratchet_kem_public` becomes
+`Option<[u8; KEM_ENCAPSULATION_KEY_LEN]>`; `from_x3dh_responder` sets
+`None`; `start_sending_chain` returns the new
+`RatchetError::NotReadyToSend` as its very first statement, so a
+refused send is a no-op on the session. `to_bytes`/`from_bytes` carry a
+presence byte, matching `RatchetHeader.kem_ciphertext`.
+
+**Regression tests** (`state.rs`):
+`a_responder_that_has_decrypted_nothing_cannot_send_yet`,
+`a_responder_can_send_once_it_has_decrypted_one_message`,
+`a_restored_responder_state_still_refuses_to_send`.
+
+### Verification
+
+Every regression test above was checked as a negative control: the fix
+was temporarily reverted in place and the suite re-run, confirming each
+test actually fails without its fix rather than passing vacuously. See
+the fix report in the SDD ledger for the per-finding results.
