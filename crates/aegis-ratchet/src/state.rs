@@ -5,7 +5,7 @@
 use core::fmt;
 
 use crate::error::RatchetError;
-use crate::kdf_chain::{kdf_ck, kdf_rk, CHAIN_KEY_LEN, ROOT_KEY_LEN};
+use crate::kdf_chain::{kdf_ck, kdf_rk, CHAIN_KEY_LEN, MESSAGE_KEY_LEN, ROOT_KEY_LEN};
 use crate::prekey::{ByteCursor, ECDH_PUBLIC_KEY_LEN, KEM_CIPHERTEXT_LEN, KEM_ENCAPSULATION_KEY_LEN};
 use aegis_crypto::ecdh::Brainpool512SecretKey;
 use aegis_crypto::kem::MlKem1024KeyPair;
@@ -29,7 +29,23 @@ pub struct RatchetState {
     pub(crate) self_ratchet_ecdh: Brainpool512SecretKey,
     pub(crate) self_ratchet_kem: MlKem1024KeyPair,
     pub(crate) peer_ratchet_ecdh_public: [u8; ECDH_PUBLIC_KEY_LEN],
-    pub(crate) peer_ratchet_kem_public: [u8; KEM_ENCAPSULATION_KEY_LEN],
+    /// The peer's current ratchet ML-KEM encapsulation key, or `None`
+    /// when it isn't known yet.
+    ///
+    /// `None` is reachable in exactly one situation: the X3DH
+    /// responder between [`RatchetState::from_x3dh_responder`] and his
+    /// first successful [`RatchetState::decrypt`], because only the
+    /// initiator's first message header carries that key (design
+    /// §4.3). This used to be an all-zero placeholder "overwritten
+    /// before it is ever used" — but an application that lets the
+    /// responder speak first breaks that assumption, and all-zero
+    /// bytes pass ML-KEM's FIPS 203 modulus check, so encapsulation
+    /// silently succeeded against garbage and produced a message the
+    /// peer could never decrypt (final-review finding I1). The
+    /// `Option` makes the unknown case unrepresentable-as-zero, and
+    /// [`RatchetState::start_sending_chain`] fails with
+    /// [`RatchetError::NotReadyToSend`] instead.
+    pub(crate) peer_ratchet_kem_public: Option<[u8; KEM_ENCAPSULATION_KEY_LEN]>,
     pub(crate) send_message_number: u32,
     pub(crate) receive_message_number: u32,
     pub(crate) previous_chain_length: u32,
@@ -55,7 +71,10 @@ impl fmt::Debug for RatchetState {
             .field("self_ratchet_ecdh", &"<redacted>")
             .field("self_ratchet_kem", &"<redacted>")
             .field("peer_ratchet_ecdh_public", &"<public, omitted>")
-            .field("peer_ratchet_kem_public", &"<public, omitted>")
+            .field(
+                "peer_ratchet_kem_public",
+                &self.peer_ratchet_kem_public.map(|_| "<public, omitted>"),
+            )
             .field("send_message_number", &self.send_message_number)
             .field("receive_message_number", &self.receive_message_number)
             .field("previous_chain_length", &self.previous_chain_length)
@@ -64,7 +83,77 @@ impl fmt::Debug for RatchetState {
     }
 }
 
+/// A DH ratchet step that has been fully *computed* but not yet
+/// applied to any [`RatchetState`] — the uncommitted half of
+/// [`RatchetState::plan_dh_ratchet_step`] /
+/// [`RatchetState::commit_dh_ratchet_step`].
+///
+/// Exists solely to make finding C2's transactional guarantee
+/// expressible in the type system: `plan_dh_ratchet_step` takes
+/// `&self` and so *cannot* mutate the session, and every field write
+/// the step implies is parked in here until
+/// [`RatchetState::decrypt`] has seen the triggering message clear its
+/// AEAD tag. If the message turns out to be a replay, a forgery, or a
+/// header-tampered copy, this value is simply dropped and the session
+/// is byte-for-byte unchanged.
+///
+/// Every secret it carries (`new_root_key`, `new_receiving_chain_key`,
+/// the message keys inside `old_chain_skipped`, and both new private
+/// keypairs) is either `Zeroizing` or a key type that wipes itself on
+/// drop, so dropping an abandoned step wipes rather than leaks.
+struct PendingRatchetStep {
+    /// Message keys for the chain being superseded, derived here
+    /// rather than inserted directly into
+    /// `RatchetState::skipped_message_keys`, so a failed message does
+    /// not leave `MAX_SKIP`-bounded cache churn (and eviction of
+    /// genuinely useful keys) behind as a side effect.
+    old_chain_skipped: Vec<(
+        [u8; ECDH_PUBLIC_KEY_LEN],
+        u32,
+        Zeroizing<[u8; MESSAGE_KEY_LEN]>,
+    )>,
+    new_root_key: Zeroizing<[u8; ROOT_KEY_LEN]>,
+    new_receiving_chain_key: Zeroizing<[u8; CHAIN_KEY_LEN]>,
+    new_self_ratchet_ecdh: Brainpool512SecretKey,
+    new_self_ratchet_kem: MlKem1024KeyPair,
+    new_peer_ratchet_ecdh_public: [u8; ECDH_PUBLIC_KEY_LEN],
+    new_peer_ratchet_kem_public: [u8; KEM_ENCAPSULATION_KEY_LEN],
+    new_previous_chain_length: u32,
+}
+
 impl RatchetState {
+    /// Build the AEAD associated data for one message: the caller's
+    /// own `aad` **and** the message header, each length-framed.
+    ///
+    /// Design §4.1 requires the header to be authenticated alongside
+    /// the caller's `aad`; the implementation passed only `aad`, which
+    /// left every header field malleable (final-review finding C1).
+    /// `message_number` and `previous_chain_length` in particular are
+    /// pure integers an attacker could edit in flight: bumping
+    /// `previous_chain_length` drives the receiver's catch-up loop
+    /// into deriving and caching keys for messages that never existed,
+    /// and bumping `message_number` fast-forwards the receiving chain
+    /// past keys it will now never derive — both of which corrupt a
+    /// session without ever touching the ciphertext the AEAD tag
+    /// actually covered.
+    ///
+    /// Each part is prefixed with its own big-endian `u64` length, so
+    /// the encoding is injective: no two distinct `(aad, header)`
+    /// pairs can produce the same associated-data bytes. Plain
+    /// concatenation would not have that property — `aad = "AB"` with
+    /// a header starting `C`, and `aad = "A"` with a header starting
+    /// `BC`, would be indistinguishable, letting an attacker shift
+    /// bytes across the boundary.
+    fn aead_associated_data(caller_aad: &[u8], header: &RatchetHeader) -> Vec<u8> {
+        let header_bytes = header.to_bytes();
+        let mut out = Vec::with_capacity(16 + caller_aad.len() + header_bytes.len());
+        out.extend_from_slice(&(caller_aad.len() as u64).to_be_bytes());
+        out.extend_from_slice(caller_aad);
+        out.extend_from_slice(&(header_bytes.len() as u64).to_be_bytes());
+        out.extend_from_slice(&header_bytes);
+        out
+    }
+
     /// Build Alice's initial state right after [`crate::x3dh::initiate_x3dh`].
     /// Bob's signed pre-key doubles as his first ratchet public keys —
     /// standard X3DH-to-Double-Ratchet handoff. `sending_chain` starts
@@ -83,7 +172,7 @@ impl RatchetState {
             self_ratchet_ecdh: Brainpool512SecretKey::generate(),
             self_ratchet_kem: MlKem1024KeyPair::generate(),
             peer_ratchet_ecdh_public: peer_signed_pre_key_ecdh_public,
-            peer_ratchet_kem_public: peer_signed_pre_key_kem_public,
+            peer_ratchet_kem_public: Some(peer_signed_pre_key_kem_public),
             send_message_number: 0,
             receive_message_number: 0,
             previous_chain_length: 0,
@@ -132,12 +221,13 @@ impl RatchetState {
             self_ratchet_kem: my_signed_pre_key_kem,
             peer_ratchet_ecdh_public: peer_ephemeral_ecdh_public,
             // Bob doesn't have Alice's ratchet KEM public key yet --
-            // only her first message's header carries it. Zeroed here;
-            // Task 7's DH ratchet step overwrites it (and populates
-            // receiving_chain) the moment decrypt_message sees that
-            // header, before this placeholder value is ever used for
-            // anything.
-            peer_ratchet_kem_public: [0u8; KEM_ENCAPSULATION_KEY_LEN],
+            // only her first message's header carries it. `None`, not
+            // an all-zero placeholder: see the field's own doc comment
+            // and final-review finding I1. Until the DH ratchet step
+            // driven by Alice's first message fills this in, `encrypt`
+            // refuses with `RatchetError::NotReadyToSend` rather than
+            // encapsulating against a key nobody holds.
+            peer_ratchet_kem_public: None,
             send_message_number: 0,
             receive_message_number: 0,
             previous_chain_length: 0,
@@ -152,9 +242,15 @@ impl RatchetState {
     /// (64 bytes, via [`Brainpool512SecretKey::to_bytes`]) --
     /// `self_ratchet_kem` (64-byte seed, via
     /// [`MlKem1024KeyPair::to_seed_bytes`]) -- `peer_ratchet_ecdh_public`
-    /// -- `peer_ratchet_kem_public` -- the three `u32` counters,
-    /// big-endian. [`Self::from_bytes`] must consume fields in this
-    /// exact order.
+    /// -- `peer_ratchet_kem_public` presence byte + optional 1568-byte
+    /// key -- the three `u32` counters, big-endian.
+    /// [`Self::from_bytes`] must consume fields in this exact order.
+    ///
+    /// The presence byte on `peer_ratchet_kem_public` follows the same
+    /// convention every other optional fixed-size field in this crate
+    /// uses (`RatchetHeader.kem_ciphertext`,
+    /// `PreKeyBundle.one_time_pre_key`): `0x00` for absent, `0x01`
+    /// followed by the value.
     ///
     /// Returns `Zeroizing<Vec<u8>>`, not a plain `Vec<u8>`: this buffer
     /// carries the entire secret ratchet session state (root key, chain
@@ -184,7 +280,13 @@ impl RatchetState {
         out.extend_from_slice(&*self.self_ratchet_ecdh.to_bytes());
         out.extend_from_slice(&*self.self_ratchet_kem.to_seed_bytes());
         out.extend_from_slice(&self.peer_ratchet_ecdh_public);
-        out.extend_from_slice(&self.peer_ratchet_kem_public);
+        match &self.peer_ratchet_kem_public {
+            None => out.push(0x00),
+            Some(key) => {
+                out.push(0x01);
+                out.extend_from_slice(key);
+            }
+        }
         out.extend_from_slice(&self.send_message_number.to_be_bytes());
         out.extend_from_slice(&self.receive_message_number.to_be_bytes());
         out.extend_from_slice(&self.previous_chain_length.to_be_bytes());
@@ -275,9 +377,16 @@ impl RatchetState {
         let peer_ratchet_ecdh_public = cursor
             .take_array::<ECDH_PUBLIC_KEY_LEN>()
             .map_err(|_| RatchetError::MalformedMessage)?;
-        let peer_ratchet_kem_public = cursor
-            .take_array::<KEM_ENCAPSULATION_KEY_LEN>()
-            .map_err(|_| RatchetError::MalformedMessage)?;
+        let peer_ratchet_kem_public =
+            match cursor.take_byte().map_err(|_| RatchetError::MalformedMessage)? {
+                0x00 => None,
+                0x01 => Some(
+                    cursor
+                        .take_array::<KEM_ENCAPSULATION_KEY_LEN>()
+                        .map_err(|_| RatchetError::MalformedMessage)?,
+                ),
+                _ => return Err(RatchetError::MalformedMessage),
+            };
 
         let send_message_number = u32::from_be_bytes(
             cursor.take_array::<4>().map_err(|_| RatchetError::MalformedMessage)?,
@@ -338,29 +447,50 @@ impl RatchetState {
         out
     }
 
-    /// A DH ratchet step, triggered when `header` carries a peer
-    /// ratchet public key not yet seen (design §3.2). Advances
-    /// `receiving_chain` using `header`'s KEM ciphertext (which must
-    /// be present -- the first message of any new peer chain always
-    /// carries one, by construction of [`Self::start_sending_chain`]),
-    /// generates a fresh self-ratchet keypair, and starts a new
-    /// `sending_chain` toward the peer's newly announced public keys.
-    pub(crate) fn dh_ratchet_step(&mut self, header: &RatchetHeader) -> Result<(), RatchetError> {
-        // Before overwriting the current receiving chain, derive and
-        // cache the message keys for any messages on it that were
-        // never received (design §5) -- otherwise a message that was
-        // in flight when the peer ratcheted forward would be silently
-        // stranded: once `receiving_chain` is replaced below, there is
-        // no way to derive that old chain's keys again.
-        if let Some(old_chain) = &mut self.receiving_chain {
+    /// Compute a DH ratchet step (design §3.2) **without touching
+    /// `self`**, so the caller can hold the result uncommitted until
+    /// the message that triggered it has actually authenticated.
+    ///
+    /// This split exists because of final-review finding C2. The
+    /// previous `dh_ratchet_step` mutated `self` directly and returned
+    /// `()`, which meant a message that later failed its AEAD check had
+    /// *already* replaced the root key, the receiving chain, both peer
+    /// key fields and the self-ratchet keypair. That is not a
+    /// theoretical hazard: ML-KEM decapsulation cannot fail on a wrong
+    /// or replayed ciphertext — FIPS 203 mandates implicit rejection,
+    /// which silently returns an unpredictable shared secret instead of
+    /// an error — so an ordinary duplicate of an already-processed
+    /// message reached this code, produced a garbage chain, committed
+    /// it, and permanently destroyed the session in both directions,
+    /// with the corruption only surfacing later on some unrelated,
+    /// legitimate message.
+    ///
+    /// `header`'s KEM ciphertext must be present: the first message of
+    /// any new peer chain always carries one, by construction of
+    /// [`Self::start_sending_chain`].
+    fn plan_dh_ratchet_step(
+        &self,
+        header: &RatchetHeader,
+    ) -> Result<PendingRatchetStep, RatchetError> {
+        // Before the current receiving chain is superseded, derive the
+        // message keys for any messages on it that were never received
+        // (design §5) -- otherwise a message that was in flight when
+        // the peer ratcheted forward would be silently stranded: once
+        // `receiving_chain` is replaced, there is no way to derive that
+        // old chain's keys again. Collected into a local buffer, not
+        // inserted into `self.skipped_message_keys`, for the same
+        // transactional reason as everything else here.
+        let mut old_chain_skipped = Vec::new();
+        if let Some(old_chain) = &self.receiving_chain {
             // Bound the catch-up gap before deriving anything:
             // `header.previous_chain_length` is a peer-controlled `u32`
-            // read straight off the wire (Finding #1). Without this
-            // check, a malicious header (e.g. `previous_chain_length =
-            // u32::MAX`) would drive this loop through billions of
-            // `kdf_ck` calls before the message's own AEAD tag is ever
-            // checked -- a DoS. Guarded against `u32` underflow: only
-            // compute the gap when there actually is one.
+            // read straight off the wire (Task 10's Finding #1).
+            // Without this check, a malicious header (e.g.
+            // `previous_chain_length = u32::MAX`) would drive this loop
+            // through billions of `kdf_ck` calls before the message's
+            // own AEAD tag is ever checked -- a DoS. Guarded against
+            // `u32` underflow: only compute the gap when there actually
+            // is one.
             if header.previous_chain_length > self.receive_message_number {
                 let gap = header.previous_chain_length - self.receive_message_number;
                 if gap as usize > crate::skipped_keys::MAX_SKIP {
@@ -368,45 +498,72 @@ impl RatchetState {
                 }
             }
             let mut chain_key = old_chain.chain_key.clone();
-            while self.receive_message_number < header.previous_chain_length {
+            let mut message_number = self.receive_message_number;
+            while message_number < header.previous_chain_length {
                 let (new_chain_key, message_key) = kdf_ck(&chain_key);
-                self.skipped_message_keys.insert(
+                old_chain_skipped.push((
                     self.peer_ratchet_ecdh_public,
-                    self.receive_message_number,
+                    message_number,
                     message_key,
-                );
+                ));
                 chain_key = new_chain_key;
-                self.receive_message_number += 1;
+                message_number += 1;
             }
         }
 
         let kem_ciphertext = header.kem_ciphertext.ok_or(RatchetError::MalformedMessage)?;
 
-        let ecdh_shared =
-            aegis_crypto::ecdh::brainpool512_diffie_hellman(&self.self_ratchet_ecdh, &header.ratchet_ecdh_public)?;
-        let kem_shared = aegis_crypto::kem::ml_kem_decapsulate(&self.self_ratchet_kem, &kem_ciphertext)?;
+        let ecdh_shared = aegis_crypto::ecdh::brainpool512_diffie_hellman(
+            &self.self_ratchet_ecdh,
+            &header.ratchet_ecdh_public,
+        )?;
+        let kem_shared =
+            aegis_crypto::kem::ml_kem_decapsulate(&self.self_ratchet_kem, &kem_ciphertext)?;
         let hybrid_secret = Self::hybrid_ratchet_secret(&ecdh_shared, &kem_shared);
 
-        let (new_root_key, chain_key) = kdf_rk(&self.root_key, hybrid_secret.as_ref());
-        self.root_key = new_root_key;
-        self.receiving_chain = Some(ChainState { chain_key });
+        let (new_root_key, new_receiving_chain_key) =
+            kdf_rk(&self.root_key, hybrid_secret.as_ref());
+
+        Ok(PendingRatchetStep {
+            old_chain_skipped,
+            new_root_key,
+            new_receiving_chain_key,
+            // A fresh keypair for our own next sending chain --
+            // generated now so the *next* start_sending_chain call
+            // (from encrypt, whenever we next send) uses it, matching
+            // Signal's "generate immediately on receiving a new ratchet
+            // key" step.
+            new_self_ratchet_ecdh: Brainpool512SecretKey::generate(),
+            new_self_ratchet_kem: MlKem1024KeyPair::generate(),
+            new_peer_ratchet_ecdh_public: header.ratchet_ecdh_public,
+            new_peer_ratchet_kem_public: header.ratchet_kem_public,
+            new_previous_chain_length: self.send_message_number,
+        })
+    }
+
+    /// Apply a [`PendingRatchetStep`] produced by
+    /// [`Self::plan_dh_ratchet_step`]. Every field write the DH ratchet
+    /// step performs happens here and nowhere else, so the caller
+    /// controls exactly when the session state changes — see
+    /// [`Self::decrypt`], which calls this only after the triggering
+    /// message has authenticated.
+    fn commit_dh_ratchet_step(&mut self, step: PendingRatchetStep) {
+        for (sender, message_number, key) in step.old_chain_skipped {
+            self.skipped_message_keys
+                .insert(sender, message_number, key);
+        }
+        self.root_key = step.new_root_key;
+        self.receiving_chain = Some(ChainState {
+            chain_key: step.new_receiving_chain_key,
+        });
         self.receive_message_number = 0;
-        self.previous_chain_length = self.send_message_number;
-
-        self.peer_ratchet_ecdh_public = header.ratchet_ecdh_public;
-        self.peer_ratchet_kem_public = header.ratchet_kem_public;
-
-        // A fresh keypair for our own next sending chain -- generated
-        // now so the *next* start_sending_chain call (from
-        // encrypt_message, whenever we next send) uses it, matching
-        // Signal's "generate immediately on receiving a new ratchet
-        // key" step.
-        self.self_ratchet_ecdh = Brainpool512SecretKey::generate();
-        self.self_ratchet_kem = MlKem1024KeyPair::generate();
+        self.previous_chain_length = step.new_previous_chain_length;
+        self.peer_ratchet_ecdh_public = step.new_peer_ratchet_ecdh_public;
+        self.peer_ratchet_kem_public = Some(step.new_peer_ratchet_kem_public);
+        self.self_ratchet_ecdh = step.new_self_ratchet_ecdh;
+        self.self_ratchet_kem = step.new_self_ratchet_kem;
         self.sending_chain = None;
         self.send_message_number = 0;
-
-        Ok(())
     }
 
     /// Start a fresh sending chain toward `peer_ratchet_ecdh_public`/
@@ -416,13 +573,28 @@ impl RatchetState {
     /// the *only* header shape that ever carries `kem_ciphertext:
     /// Some(_)`, which is exactly what marks "first message of a new
     /// chain" to the receiver.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RatchetError::NotReadyToSend`] if
+    /// `peer_ratchet_kem_public` is `None` — the X3DH responder before
+    /// his first successful `decrypt` (finding I1). Checked first, so
+    /// this function is a no-op on `self` when it fails.
     pub(crate) fn start_sending_chain(&mut self) -> Result<RatchetHeader, RatchetError> {
+        // First statement in the function, deliberately: everything
+        // below either mutates `self` or is wasted work, and this is
+        // the one failure mode that is a property of the session
+        // rather than of the key material.
+        let peer_ratchet_kem_public = self
+            .peer_ratchet_kem_public
+            .ok_or(RatchetError::NotReadyToSend)?;
+
         let ecdh_shared = aegis_crypto::ecdh::brainpool512_diffie_hellman(
             &self.self_ratchet_ecdh,
             &self.peer_ratchet_ecdh_public,
         )?;
         let (kem_ciphertext_vec, kem_shared) =
-            aegis_crypto::kem::ml_kem_encapsulate(&self.peer_ratchet_kem_public)?;
+            aegis_crypto::kem::ml_kem_encapsulate(&peer_ratchet_kem_public)?;
         let kem_ciphertext: [u8; KEM_CIPHERTEXT_LEN] = kem_ciphertext_vec
             .try_into()
             .expect("ml_kem_encapsulate ciphertext is always KEM_CIPHERTEXT_LEN bytes");
@@ -482,12 +654,21 @@ impl RatchetState {
 
         header.message_number = self.send_message_number;
 
+        // Every header field is now final, so the associated data can
+        // be built: `aad` plus the header itself, length-framed
+        // (finding C1 -- see `aead_associated_data`). Building it here
+        // rather than earlier is load-bearing: `message_number` is
+        // assigned on the line above, and authenticating a header that
+        // differs from the one actually transmitted would make every
+        // message undecryptable.
+        let associated_data = Self::aead_associated_data(aad, &header);
+
         let nonce = [0u8; 12]; // safe: message_key is single-use, see Task 8 notes below
         let ciphertext = aegis_crypto::aead::encrypt(
             aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
             &message_key,
             &nonce,
-            aad,
+            &associated_data,
             plaintext,
         )
         .map_err(|_| RatchetError::DecryptionFailed)?; // encrypt only fails on malformed inputs, which don't occur here; kept as a Result for symmetry with decrypt
@@ -501,7 +682,41 @@ impl RatchetState {
     /// Task 10 adds out-of-order/skipped-key handling on top of this).
     /// Performs a DH ratchet step first if `message.header` carries a
     /// peer ratchet public key not yet seen.
+    ///
+    /// # Transactional guarantee
+    ///
+    /// **No field of `self` changes unless this call returns `Ok`.**
+    /// Every candidate mutation — the DH ratchet step, the
+    /// skipped-key catch-up derivations, the chain-key advance, the
+    /// receive counter, and the consumption of a cached skipped key —
+    /// is computed into locals and applied only past the single
+    /// commit point below, after the AEAD tag has verified.
+    ///
+    /// This is final-review finding C2, and it is not a theoretical
+    /// hazard. ML-KEM decapsulation cannot report a wrong ciphertext:
+    /// FIPS 203 §6.3 mandates *implicit rejection*, returning an
+    /// unpredictable-but-well-formed shared secret rather than an
+    /// error. So an ordinary duplicate of an already-processed
+    /// chain-opening message — no attacker required, just a network
+    /// retransmit — used to reach `dh_ratchet_step`, decapsulate to
+    /// garbage, and commit a garbage root key, receiving chain, peer
+    /// key pair and self key pair before the AEAD call that would have
+    /// rejected it. The session was then permanently dead in both
+    /// directions, and the failure surfaced later on an unrelated,
+    /// perfectly legitimate message.
     pub fn decrypt(&mut self, message: &RatchetMessage, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, RatchetError> {
+        // The header is authenticated alongside the caller's `aad`
+        // (finding C1). Note what this buys the transactional logic
+        // below for free: `message_number` and `previous_chain_length`
+        // drive every derivation decision here, and they are now
+        // covered by the same tag as the ciphertext, so a header-edited
+        // message fails authentication instead of steering the state
+        // machine.
+        let associated_data = Self::aead_associated_data(aad, &message.header);
+        let nonce = [0u8; 12]; // matches encrypt's nonce construction -- see Task 8 notes
+        let header_sender = message.header.ratchet_ecdh_public;
+        let message_number = message.header.message_number;
+
         // Try the skip-cache FIRST, keyed by the message's OWN header
         // ratchet key -- not `self.peer_ratchet_ecdh_public` -- and
         // before any ratchet-step decision (Finding #2). A message that
@@ -514,100 +729,131 @@ impl RatchetState {
         // when the peer ratcheted forward. This mirrors Signal's own
         // reference `RatchetDecrypt`, where `TrySkippedMessageKeys` runs
         // before `DHRatchet`.
-        let header_sender = message.header.ratchet_ecdh_public;
+        //
+        // `peek` (+ `cloned`), never `take`: the lookup must not remove
+        // the entry, because the AEAD call below may reject the
+        // message, and a tampered delivery must not make a later,
+        // correct retransmission of the same message undecryptable.
+        // Remove-then-reinsert-on-failure would also silently move the
+        // entry to the back of the cache's FIFO eviction order.
         if let Some(key) = self
             .skipped_message_keys
-            .take(header_sender, message.header.message_number)
+            .peek(header_sender, message_number)
+            .cloned()
         {
-            let nonce = [0u8; 12];
-            return match aegis_crypto::aead::decrypt(
+            let plaintext = aegis_crypto::aead::decrypt(
                 aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
                 &key,
                 &nonce,
-                aad,
+                &associated_data,
                 &message.ciphertext,
-            ) {
-                Ok(plaintext) => Ok(Zeroizing::new(plaintext)),
-                Err(_) => {
-                    // Re-insert rather than let `.take()` permanently
-                    // discard this key: a tampered/corrupted delivery
-                    // of this message must not also make a later,
-                    // correct retransmission of the same message
-                    // undecryptable. Mirrors the same "don't commit
-                    // state until the fallible step succeeds"
-                    // principle Task 9's review caught in the in-order
-                    // path (chain.chain_key advancing before the AEAD
-                    // call was known to succeed) -- applied here to
-                    // the skipped-key cache instead of the chain key.
-                    self.skipped_message_keys
-                        .insert(header_sender, message.header.message_number, key);
-                    Err(RatchetError::DecryptionFailed)
-                }
-            };
+            )
+            .map_err(|_| RatchetError::DecryptionFailed)?;
+
+            // Commit point for this path: the key authenticated the
+            // message, so consume it (skipped keys are single-use,
+            // design §5). Nothing else about the session changes.
+            self.skipped_message_keys.remove(header_sender, message_number);
+            return Ok(Zeroizing::new(plaintext));
         }
 
-        if message.header.ratchet_ecdh_public != self.peer_ratchet_ecdh_public
+        // ---- Everything from here to the commit point is computed
+        // ---- into locals. `self` is not written to.
+
+        // A header carrying an unseen peer ratchet key (or arriving
+        // before any receiving chain exists) implies a DH ratchet step.
+        // Plan it; do not apply it.
+        let pending_step = if header_sender != self.peer_ratchet_ecdh_public
             || self.receiving_chain.is_none()
         {
-            self.dh_ratchet_step(&message.header)?;
-        }
+            Some(self.plan_dh_ratchet_step(&message.header)?)
+        } else {
+            None
+        };
 
-        let chain = self
-            .receiving_chain
-            .as_mut()
-            .ok_or(RatchetError::UnknownMessage)?; // dh_ratchet_step above always populates this when it runs; None here means a header we can't process
+        // Whichever chain this message belongs to -- the one the
+        // pending step would install, or the live receiving chain --
+        // is worked on as a local copy of its chain key plus a local
+        // receive counter.
+        let (mut chain_key, mut receive_message_number, chain_sender) = match &pending_step {
+            Some(step) => (
+                step.new_receiving_chain_key.clone(),
+                0u32,
+                step.new_peer_ratchet_ecdh_public,
+            ),
+            // `plan_dh_ratchet_step` runs above whenever
+            // `receiving_chain` is `None`, so this branch always has a
+            // chain; the `ok_or` is a defensive non-panicking fallback
+            // rather than a reachable path.
+            None => (
+                self.receiving_chain
+                    .as_ref()
+                    .ok_or(RatchetError::UnknownMessage)?
+                    .chain_key
+                    .clone(),
+                self.receive_message_number,
+                self.peer_ratchet_ecdh_public,
+            ),
+        };
 
-        if message.header.message_number < self.receive_message_number {
+        if message_number < receive_message_number {
             // Already consumed on the live chain, and the skip-cache
             // lookup above (keyed by this exact header) already missed
             // -- there is nothing left to try.
             return Err(RatchetError::UnknownMessage);
         }
 
-        if message.header.message_number > self.receive_message_number {
-            // Message arrived ahead of the live chain: derive and cache
-            // every intervening key so those messages can still
-            // decrypt later, then fast-forward the chain in place to
-            // the requested message number.
-            let gap = message.header.message_number - self.receive_message_number;
-            if gap as usize > crate::skipped_keys::MAX_SKIP {
-                return Err(RatchetError::SkippedKeyLimitExceeded);
-            }
-            while self.receive_message_number < message.header.message_number {
-                let (new_chain_key, message_key) = kdf_ck(&chain.chain_key);
-                chain.chain_key = new_chain_key;
-                self.skipped_message_keys.insert(
-                    self.peer_ratchet_ecdh_public,
-                    self.receive_message_number,
-                    message_key,
-                );
-                self.receive_message_number += 1;
-            }
+        // Message arrived ahead of the chain: derive every intervening
+        // key so those messages can still decrypt later. Bound the gap
+        // first -- `message_number` is peer-controlled, and although
+        // finding C1 now authenticates it, that tag is only checked
+        // *after* this loop, so the bound is still what stops an
+        // unauthenticated header from costing billions of `kdf_ck`
+        // calls.
+        let gap = message_number - receive_message_number;
+        if gap as usize > crate::skipped_keys::MAX_SKIP {
+            return Err(RatchetError::SkippedKeyLimitExceeded);
+        }
+        let mut newly_skipped = Vec::with_capacity(gap as usize);
+        while receive_message_number < message_number {
+            let (next_chain_key, message_key) = kdf_ck(&chain_key);
+            chain_key = next_chain_key;
+            newly_skipped.push((chain_sender, receive_message_number, message_key));
+            receive_message_number += 1;
         }
 
-        // Derive the next chain key and this message's key, but do NOT
-        // commit `chain.chain_key` yet: the AEAD call below is fallible
-        // (tampered ciphertext, wrong AAD), and if it fails we must
-        // leave the chain key and receive_message_number exactly as
-        // they were, so a later correct retransmission of this same
-        // message can still be decrypted. Committing the advance here
-        // unconditionally would strand the chain key one position ahead
-        // of the counter on failure, permanently breaking recovery.
-        let (new_chain_key, message_key) = kdf_ck(&chain.chain_key);
+        let (new_chain_key, message_key) = kdf_ck(&chain_key);
 
-        let nonce = [0u8; 12]; // matches encrypt_message's nonce construction -- see Task 8 notes
         let plaintext = aegis_crypto::aead::decrypt(
             aegis_crypto::aead::AeadAlgorithm::Aes256Gcm,
             &message_key,
             &nonce,
-            aad,
+            &associated_data,
             &message.ciphertext,
         )
         .map_err(|_| RatchetError::DecryptionFailed)?;
 
-        // Only now, after decrypt succeeded, commit the chain advance.
-        chain.chain_key = new_chain_key;
-        self.receive_message_number += 1;
+        // ================= COMMIT POINT =================
+        // The message has authenticated. Only now does any of it
+        // become visible in `self`. Everything below this line is
+        // infallible by construction, so the session cannot be left
+        // half-updated.
+        if let Some(step) = pending_step {
+            // Installs the new root key, peer keys, self keypair and
+            // the superseded chain's outstanding skipped keys, and
+            // resets the receiving chain/counter -- which the two
+            // statements below then advance to this message's actual
+            // position on that new chain.
+            self.commit_dh_ratchet_step(step);
+        }
+        for (sender, skipped_message_number, key) in newly_skipped {
+            self.skipped_message_keys
+                .insert(sender, skipped_message_number, key);
+        }
+        self.receiving_chain = Some(ChainState {
+            chain_key: new_chain_key,
+        });
+        self.receive_message_number = receive_message_number + 1;
 
         Ok(Zeroizing::new(plaintext))
     }
@@ -956,10 +1202,23 @@ mod tests {
         };
 
         assert!(alice_state.receiving_chain.is_none());
-        alice_state.dh_ratchet_step(&header).unwrap();
+
+        // Planning alone must leave the state completely untouched
+        // (finding C2) -- only the explicit commit applies it.
+        let step = alice_state.plan_dh_ratchet_step(&header).unwrap();
+        assert!(
+            alice_state.receiving_chain.is_none(),
+            "plan_dh_ratchet_step must not mutate the session",
+        );
+        assert_ne!(alice_state.peer_ratchet_ecdh_public, header.ratchet_ecdh_public);
+
+        alice_state.commit_dh_ratchet_step(step);
         assert!(alice_state.receiving_chain.is_some());
         assert_eq!(alice_state.peer_ratchet_ecdh_public, header.ratchet_ecdh_public);
-        assert_eq!(alice_state.peer_ratchet_kem_public, header.ratchet_kem_public);
+        assert_eq!(
+            alice_state.peer_ratchet_kem_public,
+            Some(header.ratchet_kem_public),
+        );
         assert_eq!(alice_state.receive_message_number, 0);
     }
 
@@ -1378,6 +1637,400 @@ mod tests {
             bob_state.decrypt(&second, b"").unwrap_err(),
             RatchetError::MalformedMessage,
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Final-review finding C1: the message header must be
+    // authenticated as AEAD associated data (design §4.1).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn tampering_with_the_header_message_number_fails_authentication() {
+        // Before the fix, `message_number` was authenticated by
+        // nothing at all, so an in-flight edit steered `decrypt`'s
+        // catch-up logic directly: bumping it made the receiver derive
+        // and cache keys for messages that never existed and
+        // fast-forward its chain past them, permanently. The message
+        // then failed AEAD anyway -- but the damage was already done.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        let genuine = alice_state.encrypt(b"one", b"").unwrap();
+
+        let mut tampered = genuine.clone();
+        tampered.header.message_number = 40;
+
+        let before = bob_state.to_bytes();
+        assert_eq!(
+            bob_state.decrypt(&tampered, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+            "a header-edited message must fail authentication",
+        );
+        assert_eq!(
+            bob_state.to_bytes(),
+            before,
+            "a message that fails authentication must not change any session state",
+        );
+        assert_eq!(
+            bob_state.skipped_message_keys.len(),
+            0,
+            "no keys may be derived and cached on behalf of a message that never authenticated",
+        );
+
+        // And the genuine message is still perfectly decryptable.
+        assert_eq!(&*bob_state.decrypt(&genuine, b"").unwrap(), b"one");
+    }
+
+    #[test]
+    fn tampering_with_the_header_previous_chain_length_fails_authentication() {
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        let genuine = alice_state.encrypt(b"one", b"").unwrap();
+        let mut tampered = genuine.clone();
+        tampered.header.previous_chain_length ^= 0x0F;
+
+        let before = bob_state.to_bytes();
+        assert_eq!(
+            bob_state.decrypt(&tampered, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+        );
+        assert_eq!(bob_state.to_bytes(), before);
+        assert_eq!(&*bob_state.decrypt(&genuine, b"").unwrap(), b"one");
+    }
+
+    #[test]
+    fn tampering_with_the_header_ratchet_kem_public_fails_authentication() {
+        // `ratchet_kem_public` is the key the receiver will encapsulate
+        // against for its own next sending chain. Unauthenticated, an
+        // attacker could substitute their own and read everything the
+        // receiver sends back; the ECDH leg would still protect it, but
+        // the PQ leg -- the entire point of this ratchet -- would be
+        // silently downgraded to the attacker's key.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let genuine = alice_state.encrypt(b"zero", b"").unwrap();
+
+        let mut tampered = genuine.clone();
+        tampered.header.ratchet_kem_public = MlKem1024KeyPair::generate()
+            .encapsulation_key_bytes()
+            .try_into()
+            .unwrap();
+
+        let before = bob_state.to_bytes();
+        assert_eq!(
+            bob_state.decrypt(&tampered, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+        );
+        assert_eq!(
+            bob_state.to_bytes(),
+            before,
+            "a substituted ratchet KEM key must not be adopted by a message that fails AEAD",
+        );
+        assert_eq!(&*bob_state.decrypt(&genuine, b"").unwrap(), b"zero");
+    }
+
+    #[test]
+    fn every_single_bit_flip_in_a_header_is_detected() {
+        // Broad version of the three targeted tests above: the header's
+        // byte encoding is length-framed into the AEAD's associated
+        // data, so flipping any bit anywhere in it -- not just in the
+        // fields this crate happens to read -- must be rejected, and
+        // must leave the session untouched. Sampled across the encoding
+        // rather than every one of its ~4300 bytes, to keep the test
+        // fast.
+        //
+        // The assertion is "rejected, state unchanged", not a specific
+        // error variant, because different regions of the header are
+        // legitimately caught at different layers: a flip inside
+        // `ratchet_ecdh_public` usually yields a point that is not on
+        // brainpool512r1 at all, which `brainpool512_diffie_hellman`
+        // rejects as `Crypto(InvalidPeerPublicKey)` before any AEAD call
+        // happens. That is a strictly earlier and equally safe
+        // rejection -- what must never happen is acceptance, or a
+        // rejection that still mutated the session.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let genuine = alice_state.encrypt(b"zero", b"").unwrap();
+        let header_len = genuine.header.to_bytes().len();
+        let before = bob_state.to_bytes();
+
+        let mut flips_checked = 0;
+        for byte_index in (0..header_len).step_by(97) {
+            let mut header_bytes = genuine.header.to_bytes();
+            header_bytes[byte_index] ^= 0x01;
+            // Only bit flips that still decode to a well-formed header
+            // are interesting here; the presence-byte position decodes
+            // to a different shape and is covered by the malformed-input
+            // tests instead.
+            let Ok(header) = RatchetHeader::from_bytes(&header_bytes) else {
+                continue;
+            };
+            if header == genuine.header {
+                continue;
+            }
+            let tampered = RatchetMessage {
+                header,
+                ciphertext: genuine.ciphertext.clone(),
+            };
+            assert!(
+                bob_state.decrypt(&tampered, b"").is_err(),
+                "bit flip at header byte {byte_index} was not detected",
+            );
+            assert_eq!(
+                bob_state.to_bytes(),
+                before,
+                "bit flip at header byte {byte_index} changed session state",
+            );
+            flips_checked += 1;
+        }
+        assert!(flips_checked > 10, "the sweep must actually exercise the header");
+
+        assert_eq!(&*bob_state.decrypt(&genuine, b"").unwrap(), b"zero");
+    }
+
+    #[test]
+    fn the_caller_aad_and_the_header_cannot_be_shifted_across_their_boundary() {
+        // The associated data is `len(aad) || aad || len(header) ||
+        // header`, so the caller's `aad` and the header occupy
+        // unambiguous, non-interchangeable positions. With plain
+        // concatenation, moving bytes across that boundary would
+        // produce identical associated data for different inputs.
+        let header = RatchetHeader {
+            ratchet_ecdh_public: [0x01u8; ECDH_PUBLIC_KEY_LEN],
+            ratchet_kem_public: [0x02u8; KEM_ENCAPSULATION_KEY_LEN],
+            kem_ciphertext: None,
+            message_number: 0,
+            previous_chain_length: 0,
+        };
+        assert_ne!(
+            RatchetState::aead_associated_data(b"AB", &header),
+            RatchetState::aead_associated_data(b"A", &header),
+        );
+        // Same total bytes, different split -- must still differ.
+        let mut longer_aad = b"A".to_vec();
+        longer_aad.extend_from_slice(&header.to_bytes());
+        assert_ne!(
+            RatchetState::aead_associated_data(&longer_aad, &header),
+            RatchetState::aead_associated_data(b"A", &header),
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Final-review finding C2: `decrypt` must be transactional --
+    // no `self` field may change as a side effect of a message that
+    // ultimately fails AEAD authentication.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_replayed_message_that_triggers_a_ratchet_step_does_not_corrupt_the_session() {
+        // The empirically-reproduced C2 failure, end to end, with no
+        // attacker involved -- just a duplicated packet.
+        //
+        // ML-KEM decapsulation cannot report a wrong ciphertext (FIPS
+        // 203 mandates implicit rejection), so a replayed
+        // chain-opening message reaches `dh_ratchet_step`, decapsulates
+        // to an unpredictable shared secret, and -- before the fix --
+        // committed the resulting garbage root key, receiving chain,
+        // peer keys and self keypair. The session was then dead in both
+        // directions, and the failure surfaced later, on an unrelated
+        // legitimate message.
+        let (mut alice_state, mut bob_state) = two_party_session();
+
+        // Chain A: Alice opens.
+        let a0 = alice_state.encrypt(b"a0", b"").unwrap();
+        bob_state.decrypt(&a0, b"").unwrap();
+
+        // Chain B: Bob replies -- Alice ratchets onto it.
+        let b0 = bob_state.encrypt(b"b0", b"").unwrap();
+        assert!(b0.header.kem_ciphertext.is_some(), "b0 must open a new chain");
+        alice_state.decrypt(&b0, b"").unwrap();
+
+        // Chain A': Alice ratchets forward and sends.
+        let a1 = alice_state.encrypt(b"a1", b"").unwrap();
+        bob_state.decrypt(&a1, b"").unwrap();
+
+        // Chain C: Bob ratchets forward again. Alice is now two ratchet
+        // steps past chain B.
+        let c0 = bob_state.encrypt(b"c0", b"").unwrap();
+        assert!(c0.header.kem_ciphertext.is_some());
+        alice_state.decrypt(&c0, b"").unwrap();
+
+        // The network now redelivers `b0` -- an ordinary duplicate.
+        // Its header carries chain B's ratchet key, which no longer
+        // matches Alice's current peer key, and its key is not in the
+        // skip cache (it was consumed). So it takes exactly the
+        // ratchet-step path this finding is about.
+        let before = alice_state.to_bytes();
+        assert_eq!(
+            alice_state.decrypt(&b0, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+            "a replayed chain-opening message must be rejected",
+        );
+        assert_eq!(
+            alice_state.to_bytes(),
+            before,
+            "a rejected replay must leave the session byte-for-byte unchanged",
+        );
+
+        // The real proof: the conversation continues normally. Before
+        // the fix, this is where the corruption surfaced.
+        let c1 = bob_state.encrypt(b"c1", b"").unwrap();
+        assert_eq!(&*alice_state.decrypt(&c1, b"").unwrap(), b"c1");
+
+        let a2 = alice_state.encrypt(b"a2", b"").unwrap();
+        assert_eq!(&*bob_state.decrypt(&a2, b"").unwrap(), b"a2");
+    }
+
+    #[test]
+    fn a_forged_chain_opening_message_does_not_corrupt_the_session() {
+        // The attacker-driven variant: a well-formed header carrying a
+        // ratchet key Bob has never seen and a KEM ciphertext validly
+        // encapsulated against Bob's own current ratchet key, so the
+        // whole DH-ratchet-step computation runs to completion and only
+        // the AEAD tag rejects it. Every field the step would have
+        // written must remain untouched.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let a0 = alice_state.encrypt(b"a0", b"").unwrap();
+        bob_state.decrypt(&a0, b"").unwrap();
+
+        let attacker_ecdh = Brainpool512SecretKey::generate();
+        let (kem_ciphertext, _shared) = aegis_crypto::kem::ml_kem_encapsulate(
+            &bob_state.self_ratchet_kem.encapsulation_key_bytes(),
+        )
+        .unwrap();
+        let forged = RatchetMessage {
+            header: RatchetHeader {
+                ratchet_ecdh_public: attacker_ecdh.public_key_bytes().try_into().unwrap(),
+                ratchet_kem_public: MlKem1024KeyPair::generate()
+                    .encapsulation_key_bytes()
+                    .try_into()
+                    .unwrap(),
+                kem_ciphertext: Some(kem_ciphertext.try_into().unwrap()),
+                message_number: 0,
+                previous_chain_length: 1,
+            },
+            ciphertext: vec![0u8; 32],
+        };
+
+        let before = bob_state.to_bytes();
+        assert_eq!(
+            bob_state.decrypt(&forged, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+        );
+        assert_eq!(
+            bob_state.to_bytes(),
+            before,
+            "a forged ratchet step must not be committed",
+        );
+
+        // Alice's genuine next message still decrypts.
+        let a1 = alice_state.encrypt(b"a1", b"").unwrap();
+        assert_eq!(&*bob_state.decrypt(&a1, b"").unwrap(), b"a1");
+    }
+
+    #[test]
+    fn a_failed_out_of_order_decrypt_caches_no_keys() {
+        // The gap catch-up in `decrypt`'s `>` branch used to insert
+        // straight into `self.skipped_message_keys` and advance
+        // `receive_message_number` before the AEAD call. A message that
+        // then failed left the cache full of keys derived on its
+        // behalf -- bounded churn that can evict genuinely useful
+        // entries -- and the counter fast-forwarded past messages whose
+        // keys were now unreachable.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        let bootstrap = alice_state.encrypt(b"zero", b"").unwrap();
+        bob_state.decrypt(&bootstrap, b"").unwrap();
+
+        let mut sent = Vec::new();
+        for i in 0..5u32 {
+            sent.push(alice_state.encrypt(format!("msg {i}").as_bytes(), b"").unwrap());
+        }
+
+        // Deliver the last one, tampered. It is 4 ahead of the live
+        // chain, so the catch-up loop runs and derives 4 keys.
+        let mut tampered = sent[4].clone();
+        tampered.ciphertext[0] ^= 0xFF;
+
+        let before = bob_state.to_bytes();
+        assert_eq!(
+            bob_state.decrypt(&tampered, b"").unwrap_err(),
+            RatchetError::DecryptionFailed,
+        );
+        assert_eq!(
+            bob_state.skipped_message_keys.len(),
+            0,
+            "keys derived for a message that failed authentication must not be cached",
+        );
+        assert_eq!(bob_state.to_bytes(), before);
+
+        // Everything still decrypts, in any order.
+        assert_eq!(&*bob_state.decrypt(&sent[4], b"").unwrap(), b"msg 4");
+        for i in 0..4u32 {
+            let plaintext = bob_state.decrypt(&sent[i as usize], b"").unwrap();
+            assert_eq!(plaintext.as_slice(), format!("msg {i}").as_bytes());
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Final-review finding I1: a responder that has not yet learned
+    // the peer's ratchet KEM key must refuse to send, rather than
+    // encapsulate against an all-zero placeholder.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_responder_that_has_decrypted_nothing_cannot_send_yet() {
+        // Bob learns Alice's ratchet ML-KEM key only from her first
+        // message header (design §4.3). Before the fix, the field was
+        // an all-zero placeholder -- which passes ML-KEM's FIPS 203
+        // modulus check, so encapsulation silently *succeeded* against
+        // a key nobody holds, producing a message Alice could never
+        // decrypt and (via C2) destroying her session when she tried.
+        let (_alice_state, mut bob_state) = two_party_session();
+
+        let before = bob_state.to_bytes();
+        assert_eq!(
+            bob_state.encrypt(b"bob speaks first", b"").unwrap_err(),
+            RatchetError::NotReadyToSend,
+        );
+        assert_eq!(
+            bob_state.to_bytes(),
+            before,
+            "a refused send must not partially advance the session",
+        );
+    }
+
+    #[test]
+    fn a_responder_can_send_once_it_has_decrypted_one_message() {
+        // The complement: `NotReadyToSend` is a transient, correct
+        // state, not a dead end.
+        let (mut alice_state, mut bob_state) = two_party_session();
+        assert_eq!(
+            bob_state.encrypt(b"too early", b"").unwrap_err(),
+            RatchetError::NotReadyToSend,
+        );
+
+        let a0 = alice_state.encrypt(b"a0", b"").unwrap();
+        bob_state.decrypt(&a0, b"").unwrap();
+
+        let b0 = bob_state.encrypt(b"now i can", b"").unwrap();
+        assert_eq!(&*alice_state.decrypt(&b0, b"").unwrap(), b"now i can");
+    }
+
+    #[test]
+    fn a_restored_responder_state_still_refuses_to_send() {
+        // `peer_ratchet_kem_public: None` must survive the wire
+        // round trip as `None` (presence byte), not silently become an
+        // all-zero key again on reload.
+        let (_alice_state, bob_state) = two_party_session();
+        let bytes = bob_state.to_bytes();
+        let mut restored = RatchetState::from_bytes(&bytes).unwrap();
+        assert!(restored.peer_ratchet_kem_public.is_none());
+        assert_eq!(
+            restored.encrypt(b"still too early", b"").unwrap_err(),
+            RatchetError::NotReadyToSend,
+        );
+        assert_eq!(restored.to_bytes(), bytes, "round trip must be exact");
     }
 
     #[test]

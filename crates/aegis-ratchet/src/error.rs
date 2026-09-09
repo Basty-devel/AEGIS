@@ -34,6 +34,14 @@ pub enum RatchetError {
     /// §5) — deriving that many keys in one jump is refused rather
     /// than performed, to bound the cost of a single call.
     SkippedKeyLimitExceeded,
+    /// This session cannot start a sending chain yet: the peer's
+    /// ratchet ML-KEM encapsulation key is not known. Only reachable
+    /// on the X3DH responder side, which learns that key from the
+    /// initiator's first message header (design §4.3) — an
+    /// application that lets the responder speak first (simultaneous
+    /// session open, for instance) gets this error rather than a
+    /// message encrypted against an unusable placeholder key.
+    NotReadyToSend,
 }
 
 impl From<aegis_crypto::CryptoError> for RatchetError {
@@ -57,6 +65,9 @@ impl fmt::Display for RatchetError {
             Self::DecryptionFailed => f.write_str("AEAD decryption/authentication failed"),
             Self::SkippedKeyLimitExceeded => {
                 f.write_str("skip gap exceeds the maximum skipped-key derivation limit")
+            }
+            Self::NotReadyToSend => {
+                f.write_str("cannot send yet: the peer's ratchet ML-KEM public key is unknown")
             }
         }
     }
