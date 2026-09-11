@@ -66,7 +66,26 @@ impl Vault {
         let conn = if db_exists {
             db::open_existing(db_path, &vmk)?
         } else {
-            db::create_new(db_path, &vmk)?
+            match db::create_new(db_path, &vmk) {
+                Ok(conn) => conn,
+                Err(err) => {
+                    // `store_vmk` above already succeeded, so a VMK is
+                    // now orphaned in the credential store, and
+                    // `db::create_new` may have left a partial `.db`
+                    // file behind. Both are best-effort cleanup: if
+                    // either fails, that failure must not mask or
+                    // replace the original `db::create_new` error
+                    // returned below, and it must not stop the other
+                    // cleanup step from being attempted. Without this,
+                    // a retry would see the partial file, take the
+                    // existing-vault branch, load the orphaned (but
+                    // valid) VMK, and then fail forever against the
+                    // still-malformed file.
+                    let _ = store.destroy_vmk();
+                    let _ = std::fs::remove_file(db_path);
+                    return Err(err);
+                }
+            }
         };
 
         Ok(Vault {
@@ -125,6 +144,56 @@ mod tests {
         drop(second);
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn open_cleans_up_orphaned_vmk_when_create_new_fails_after_store_vmk_succeeds() {
+        let store = MockKeyStore::new();
+
+        // A path whose parent directory doesn't exist: `db_path.exists()`
+        // is false (so this takes the new-vault branch and `store_vmk`
+        // succeeds), but `db::create_new`'s `Connection::open` then fails
+        // because SQLite can't create a file under a missing directory —
+        // a deterministic way to fail `create_new` *after* the VMK is
+        // already stored.
+        let bad_path = temp_dir()
+            .join(format!(
+                "aegis-vault-test-no-such-dir-{}",
+                std::process::id()
+            ))
+            .join("vault.db");
+        assert!(
+            !bad_path.parent().unwrap().exists(),
+            "precondition: parent directory must not exist"
+        );
+
+        let result =
+            Vault::open_with_store(&bad_path, &store, "aegis-vault-test".to_string());
+        assert!(
+            result.is_err(),
+            "expected db::create_new to fail for a path with a missing parent directory"
+        );
+
+        // The orphaned VMK must have been cleaned up: load_vmk should
+        // fail exactly as it would if nothing had ever been stored,
+        // rather than returning the orphaned-but-valid key.
+        let load_result = store.load_vmk();
+        assert!(
+            matches!(load_result, Err(VaultError::StorageCorrupted(_))),
+            "expected no VMK to remain stored after cleanup, got: {load_result:?}"
+        );
+
+        // A retry with a valid path must succeed cleanly, proving the
+        // failed attempt above left no stuck state behind.
+        let good_path = temp_db_path("open-cleanup-retry");
+        let _ = std::fs::remove_file(&good_path);
+        let vault =
+            Vault::open_with_store(&good_path, &store, "aegis-vault-test".to_string()).unwrap();
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&good_path).unwrap();
     }
 
     #[test]
