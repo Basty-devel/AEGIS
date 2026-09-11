@@ -4,7 +4,9 @@
 
 use crate::db;
 use crate::error::VaultError;
+use crate::kdf::derive_dek_wrap_key;
 use crate::keystore::{HardwareKeyStore, KeyringBackend};
+use aegis_crypto::aead::{decrypt, encrypt, AeadAlgorithm};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -94,6 +96,120 @@ impl Vault {
             db_path: db_path.to_path_buf(),
             keyring_service_name,
         })
+    }
+
+    /// Encrypts `plaintext` under a fresh, random per-record DEK,
+    /// wraps that DEK under a VMK-derived key, and upserts the
+    /// `(namespace, key)` row. See design spec Section 1 for why the
+    /// DEK is random and stored (not derived) — that's what makes
+    /// `erase` (Task 8) a real cryptographic-shredding guarantee.
+    pub fn put(&mut self, namespace: &str, key: &str, plaintext: &[u8]) -> Result<(), VaultError> {
+        let mut dek = Zeroizing::new([0u8; 32]);
+        getrandom::fill(dek.as_mut())
+            .map_err(|_| VaultError::StorageCorrupted("OS RNG failure generating DEK".into()))?;
+
+        let mut record_nonce = [0u8; 12];
+        getrandom::fill(&mut record_nonce)
+            .map_err(|_| VaultError::StorageCorrupted("OS RNG failure generating nonce".into()))?;
+        let ciphertext = encrypt(
+            AeadAlgorithm::Aes256Gcm,
+            &dek,
+            &record_nonce,
+            b"",
+            plaintext,
+        )
+        .map_err(|_| VaultError::StorageCorrupted("failed to seal record".into()))?;
+
+        let mut dek_nonce = [0u8; 12];
+        getrandom::fill(&mut dek_nonce)
+            .map_err(|_| VaultError::StorageCorrupted("OS RNG failure generating DEK nonce".into()))?;
+        let wrap_key = derive_dek_wrap_key(&self.vmk);
+        let wrapped_dek = encrypt(
+            AeadAlgorithm::Aes256Gcm,
+            &wrap_key,
+            &dek_nonce,
+            b"",
+            dek.as_slice(),
+        )
+        .map_err(|_| VaultError::StorageCorrupted("failed to wrap DEK".into()))?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        self.conn.execute(
+            "INSERT INTO vault_records (namespace, key, wrapped_dek, dek_nonce, ciphertext, nonce, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT (namespace, key) DO UPDATE SET
+                wrapped_dek = excluded.wrapped_dek,
+                dek_nonce   = excluded.dek_nonce,
+                ciphertext  = excluded.ciphertext,
+                nonce       = excluded.nonce,
+                updated_at  = excluded.updated_at",
+            rusqlite::params![
+                namespace,
+                key,
+                wrapped_dek,
+                dek_nonce.to_vec(),
+                ciphertext,
+                record_nonce.to_vec(),
+                now,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Returns `Ok(None)` if `(namespace, key)` has no record, or has
+    /// been `erase`d (Task 8) — from the caller's perspective those
+    /// two cases are indistinguishable, which is the point.
+    pub fn get(&self, namespace: &str, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, VaultError> {
+        // `wrapped_dek`/`dek_nonce`: `Option` because `erase` (Task 8)
+        // sets them `NULL` in place rather than deleting the row.
+        // `ciphertext`/`nonce`: always present for any row that exists
+        // at all (`NOT NULL` in the schema).
+        type RawRecordRow = (Option<Vec<u8>>, Option<Vec<u8>>, Vec<u8>, Vec<u8>);
+        let row: Option<RawRecordRow> = self
+            .conn
+            .query_row(
+                "SELECT wrapped_dek, dek_nonce, ciphertext, nonce FROM vault_records
+                 WHERE namespace = ?1 AND key = ?2",
+                rusqlite::params![namespace, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .ok();
+
+        let Some((Some(wrapped_dek), Some(dek_nonce), ciphertext, nonce)) = row else {
+            return Ok(None);
+        };
+
+        let dek_nonce_arr: [u8; 12] = dek_nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| VaultError::StorageCorrupted("dek_nonce has wrong length".into()))?;
+        let wrap_key = derive_dek_wrap_key(&self.vmk);
+        let dek_bytes = decrypt(
+            AeadAlgorithm::Aes256Gcm,
+            &wrap_key,
+            &dek_nonce_arr,
+            b"",
+            &wrapped_dek,
+        )
+        .map_err(|_| VaultError::StorageCorrupted("failed to unwrap DEK".into()))?;
+        let dek: [u8; 32] = dek_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| VaultError::StorageCorrupted("unwrapped DEK has wrong length".into()))?;
+
+        let nonce_arr: [u8; 12] = nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| VaultError::StorageCorrupted("nonce has wrong length".into()))?;
+        let plaintext = decrypt(AeadAlgorithm::Aes256Gcm, &dek, &nonce_arr, b"", &ciphertext)
+            .map_err(|_| VaultError::StorageCorrupted("failed to open record".into()))?;
+
+        Ok(Some(Zeroizing::new(plaintext)))
     }
 }
 
@@ -209,5 +325,77 @@ mod tests {
             Err(VaultError::HardwareKeyStoreUnavailable(_))
         ));
         assert!(!path.exists(), "no database file should be left behind");
+    }
+
+    #[test]
+    fn put_then_get_round_trips_plaintext() {
+        let path = temp_db_path("put-get");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("messages", "msg-1", b"hello aegis").unwrap();
+        let got = vault.get("messages", "msg-1").unwrap().unwrap();
+        assert_eq!(&*got, b"hello aegis");
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn get_of_missing_key_returns_none_not_error() {
+        let path = temp_db_path("get-missing");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        assert!(vault.get("messages", "nope").unwrap().is_none());
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn put_overwrites_an_existing_record_with_a_fresh_dek() {
+        let path = temp_db_path("put-overwrite");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("contacts", "alice", b"v1").unwrap();
+        vault.put("contacts", "alice", b"v2").unwrap();
+        let got = vault.get("contacts", "alice").unwrap().unwrap();
+        assert_eq!(&*got, b"v2");
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn different_namespaces_do_not_collide() {
+        let path = temp_db_path("namespaces");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("ns-a", "key", b"a-value").unwrap();
+        vault.put("ns-b", "key", b"b-value").unwrap();
+        assert_eq!(&*vault.get("ns-a", "key").unwrap().unwrap(), b"a-value");
+        assert_eq!(&*vault.get("ns-b", "key").unwrap().unwrap(), b"b-value");
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
     }
 }

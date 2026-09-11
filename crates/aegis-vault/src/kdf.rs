@@ -19,10 +19,9 @@ pub(crate) fn derive_sqlcipher_key(vmk: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     derive(vmk, b"AEGIS-VAULT-SQLCIPHER-KEY-v1")
 }
 
-/// The key that wraps (encrypts) each record's per-record DEK. Not
-/// yet called outside tests — lands with per-record DEK wrapping in
-/// a later task.
-#[allow(dead_code)]
+/// The key that wraps (encrypts) each record's per-record DEK. Used
+/// by `Vault::put`/`Vault::get` to wrap/unwrap the random per-record
+/// DEK under a VMK-derived key.
 pub(crate) fn derive_dek_wrap_key(vmk: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     derive(vmk, b"AEGIS-VAULT-DEK-WRAP-v1")
 }
