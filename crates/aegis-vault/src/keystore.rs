@@ -112,5 +112,9 @@ mod tests {
             store.load_vmk(),
             Err(VaultError::HardwareKeyStoreUnavailable(_))
         ));
+        assert!(matches!(
+            store.destroy_vmk(),
+            Err(VaultError::HardwareKeyStoreUnavailable(_))
+        ));
     }
 }
