@@ -2,12 +2,15 @@
 name = "aegis-ratchet"
 version.workspace = true
 edition.workspace = true
+description = "PQ-X3DH key agreement and Double Ratchet session protocol (hybrid post-quantum/classical) for the AegisPQC messenger. NOT independently audited."
+license = "PolyForm-Noncommercial-1.0.0"
+repository.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-aegis-crypto = { path = "../aegis-crypto" }
+aegis-crypto = { path = "../aegis-crypto", version = "0.1.4" }
 zeroize = { version = "1.9", features = ["derive"] }
 hkdf = "0.13"
 sha2 = "0.11"
