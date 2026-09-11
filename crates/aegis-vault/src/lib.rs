@@ -8,7 +8,7 @@
 
 pub mod error;
 mod kdf;
-// mod keystore;
+mod keystore;
 // mod db;
 // mod vault;
 // mod export;
