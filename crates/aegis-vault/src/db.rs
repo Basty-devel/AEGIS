@@ -67,8 +67,27 @@ fn hex_encode(bytes: &[u8]) -> Zeroizing<String> {
 fn set_sqlcipher_key(conn: &Connection, vmk: &[u8; 32]) -> Result<(), VaultError> {
     let sqlcipher_key = derive_sqlcipher_key(vmk);
     let hex_key = hex_encode(sqlcipher_key.as_slice());
-    let key_pragma: Zeroizing<String> =
-        Zeroizing::new(format!("PRAGMA key = \"x'{}'\"", hex_key.as_str()));
+    // Build the PRAGMA text by hand into a buffer that is `Zeroizing`
+    // from the moment it is created, with its final capacity reserved
+    // up front. Using `format!()` here would build the result in a
+    // plain, non-zeroizing `String` first: `format!`'s buffer-sizing
+    // heuristic only accounts for the literal pieces of the format
+    // string, not the substituted hex digits, so it can under-estimate
+    // the true length and trigger a `Vec` reallocation *after* the
+    // secret hex key has already been written into the buffer — which
+    // copies the key material to a new heap allocation and frees the
+    // old one via the ordinary (non-zeroing) allocator. Reserving the
+    // exact final capacity up front means no reallocation ever happens
+    // once the secret bytes are resident, and every byte the key ever
+    // touches lives inside a buffer that `Zeroizing` will wipe on drop.
+    const PREFIX: &str = "PRAGMA key = \"x'";
+    const SUFFIX: &str = "'\"";
+    let mut key_pragma: Zeroizing<String> = Zeroizing::new(String::with_capacity(
+        PREFIX.len() + hex_key.len() + SUFFIX.len(),
+    ));
+    key_pragma.push_str(PREFIX);
+    key_pragma.push_str(hex_key.as_str());
+    key_pragma.push_str(SUFFIX);
     conn.execute_batch(key_pragma.as_str())?;
     Ok(())
 }
