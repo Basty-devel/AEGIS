@@ -31,6 +31,21 @@ pub struct Vault {
     keyring_service_name: String,
 }
 
+/// Binds `namespace` and `key` into AEAD associated data so that a
+/// `(wrapped_dek, dek_nonce, ciphertext, nonce)` tuple copied into a
+/// different row's columns (e.g. via disk-level tampering) fails AEAD
+/// authentication instead of silently decrypting under the wrong
+/// context. Length-prefixed so the encoding is unambiguous regardless
+/// of the contents of `namespace`/`key`.
+fn record_aad(namespace: &str, key: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(4 + namespace.len() + 4 + key.len());
+    aad.extend_from_slice(&(namespace.len() as u32).to_be_bytes());
+    aad.extend_from_slice(namespace.as_bytes());
+    aad.extend_from_slice(&(key.len() as u32).to_be_bytes());
+    aad.extend_from_slice(key.as_bytes());
+    aad
+}
+
 impl Vault {
     /// Opens an existing vault at `config.db_path`, or creates one if
     /// no file exists there yet. Both paths go through
@@ -111,11 +126,12 @@ impl Vault {
         let mut record_nonce = [0u8; 12];
         getrandom::fill(&mut record_nonce)
             .map_err(|_| VaultError::StorageCorrupted("OS RNG failure generating nonce".into()))?;
+        let aad = record_aad(namespace, key);
         let ciphertext = encrypt(
             AeadAlgorithm::Aes256Gcm,
             &dek,
             &record_nonce,
-            b"",
+            &aad,
             plaintext,
         )
         .map_err(|_| VaultError::StorageCorrupted("failed to seal record".into()))?;
@@ -128,7 +144,7 @@ impl Vault {
             AeadAlgorithm::Aes256Gcm,
             &wrap_key,
             &dek_nonce,
-            b"",
+            &aad,
             dek.as_slice(),
         )
         .map_err(|_| VaultError::StorageCorrupted("failed to wrap DEK".into()))?;
@@ -170,43 +186,52 @@ impl Vault {
         // `ciphertext`/`nonce`: always present for any row that exists
         // at all (`NOT NULL` in the schema).
         type RawRecordRow = (Option<Vec<u8>>, Option<Vec<u8>>, Vec<u8>, Vec<u8>);
-        let row: Option<RawRecordRow> = self
-            .conn
-            .query_row(
-                "SELECT wrapped_dek, dek_nonce, ciphertext, nonce FROM vault_records
-                 WHERE namespace = ?1 AND key = ?2",
-                rusqlite::params![namespace, key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .ok();
+        let row: Option<RawRecordRow> = match self.conn.query_row(
+            "SELECT wrapped_dek, dek_nonce, ciphertext, nonce FROM vault_records
+             WHERE namespace = ?1 AND key = ?2",
+            rusqlite::params![namespace, key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ) {
+            Ok(row) => Some(row),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(err) => return Err(err.into()),
+        };
 
         let Some((Some(wrapped_dek), Some(dek_nonce), ciphertext, nonce)) = row else {
             return Ok(None);
         };
+
+        let aad = record_aad(namespace, key);
 
         let dek_nonce_arr: [u8; 12] = dek_nonce
             .as_slice()
             .try_into()
             .map_err(|_| VaultError::StorageCorrupted("dek_nonce has wrong length".into()))?;
         let wrap_key = derive_dek_wrap_key(&self.vmk);
-        let dek_bytes = decrypt(
-            AeadAlgorithm::Aes256Gcm,
-            &wrap_key,
-            &dek_nonce_arr,
-            b"",
-            &wrapped_dek,
-        )
-        .map_err(|_| VaultError::StorageCorrupted("failed to unwrap DEK".into()))?;
-        let dek: [u8; 32] = dek_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| VaultError::StorageCorrupted("unwrapped DEK has wrong length".into()))?;
+        let dek_bytes = Zeroizing::new(
+            decrypt(
+                AeadAlgorithm::Aes256Gcm,
+                &wrap_key,
+                &dek_nonce_arr,
+                &aad,
+                &wrapped_dek,
+            )
+            .map_err(|_| VaultError::StorageCorrupted("failed to unwrap DEK".into()))?,
+        );
+        let mut dek = Zeroizing::new([0u8; 32]);
+        let dek_slice: &[u8] = dek_bytes.as_slice();
+        if dek_slice.len() != 32 {
+            return Err(VaultError::StorageCorrupted(
+                "unwrapped DEK has wrong length".into(),
+            ));
+        }
+        dek.copy_from_slice(dek_slice);
 
         let nonce_arr: [u8; 12] = nonce
             .as_slice()
             .try_into()
             .map_err(|_| VaultError::StorageCorrupted("nonce has wrong length".into()))?;
-        let plaintext = decrypt(AeadAlgorithm::Aes256Gcm, &dek, &nonce_arr, b"", &ciphertext)
+        let plaintext = decrypt(AeadAlgorithm::Aes256Gcm, &dek, &nonce_arr, &aad, &ciphertext)
             .map_err(|_| VaultError::StorageCorrupted("failed to open record".into()))?;
 
         Ok(Some(Zeroizing::new(plaintext)))
@@ -391,6 +416,48 @@ mod tests {
         vault.put("ns-b", "key", b"b-value").unwrap();
         assert_eq!(&*vault.get("ns-a", "key").unwrap().unwrap(), b"a-value");
         assert_eq!(&*vault.get("ns-b", "key").unwrap().unwrap(), b"b-value");
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn get_rejects_a_row_whose_ciphertext_columns_were_swapped_from_another_row() {
+        let path = temp_db_path("row-swap");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault =
+            Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("ns-a", "victim", b"victim plaintext").unwrap();
+        vault.put("ns-b", "attacker", b"attacker plaintext").unwrap();
+
+        // Simulate disk-level tampering: copy the attacker row's
+        // wrapped_dek/dek_nonce/ciphertext/nonce columns onto the
+        // victim row. Both rows decrypt fine on their own, but the
+        // swapped bytes are now sealed under AAD binding them to
+        // ("ns-b", "attacker") while stored at ("ns-a", "victim").
+        vault
+            .conn
+            .execute(
+                "UPDATE vault_records SET
+                    wrapped_dek = (SELECT wrapped_dek FROM vault_records WHERE namespace = 'ns-b' AND key = 'attacker'),
+                    dek_nonce   = (SELECT dek_nonce   FROM vault_records WHERE namespace = 'ns-b' AND key = 'attacker'),
+                    ciphertext  = (SELECT ciphertext  FROM vault_records WHERE namespace = 'ns-b' AND key = 'attacker'),
+                    nonce       = (SELECT nonce       FROM vault_records WHERE namespace = 'ns-b' AND key = 'attacker')
+                 WHERE namespace = 'ns-a' AND key = 'victim'",
+                [],
+            )
+            .unwrap();
+
+        let result = vault.get("ns-a", "victim");
+        assert!(
+            matches!(result, Err(VaultError::StorageCorrupted(_))),
+            "expected StorageCorrupted after row-swap tampering, got: {result:?}"
+        );
 
         // Windows keeps an exclusive file lock for as long as the
         // underlying SQLite handle is open, so it must be dropped
