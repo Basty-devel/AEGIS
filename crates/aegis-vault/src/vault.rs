@@ -16,14 +16,6 @@ pub struct VaultConfig {
     pub keyring_service_name: String,
 }
 
-// `conn`, `db_path`, and `keyring_service_name` have no reader within
-// this task: `conn` is exercised indirectly (it must exist and be
-// correctly keyed for the tests below to pass), and `db_path` /
-// `keyring_service_name` are retained now specifically so Task 9's
-// `destroy_vault` doesn't have to retrofit fields onto this struct
-// later — see this task's brief, "Produces" line. Remove this `allow`
-// once a later task adds a reader for each field.
-#[allow(dead_code)]
 pub struct Vault {
     pub(crate) conn: Connection,
     pub(crate) vmk: Zeroizing<[u8; 32]>,
@@ -268,6 +260,31 @@ impl Vault {
              WHERE namespace = ?1 AND key = ?2",
             rusqlite::params![namespace, key],
         )?;
+        Ok(())
+    }
+
+    /// Art. 17 whole-vault purge ("local purge" in the plan text).
+    /// Destroys VMK via the hardware store and deletes the database
+    /// file. Because every derived key (SQLCipher's own page-cipher
+    /// key included, Task 2) comes from VMK, destroying VMK alone
+    /// already makes the file's contents permanently unrecoverable —
+    /// deleting the file itself is a best-effort second step, not
+    /// where the erasure guarantee lives.
+    pub fn destroy_vault(self) -> Result<(), VaultError> {
+        let store = KeyringBackend::new(self.keyring_service_name.clone());
+        self.destroy_vault_with_store(&store)
+    }
+
+    /// Test seam, same pattern as `open_with_store`.
+    pub(crate) fn destroy_vault_with_store(
+        self,
+        store: &dyn HardwareKeyStore,
+    ) -> Result<(), VaultError> {
+        store.destroy_vmk()?;
+        drop(self.conn);
+        if self.db_path.exists() {
+            std::fs::remove_file(&self.db_path)?;
+        }
         Ok(())
     }
 }
@@ -608,5 +625,38 @@ mod tests {
         let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
 
         vault.erase("messages", "never-existed").unwrap();
+    }
+
+    #[test]
+    fn destroy_vault_makes_the_db_file_and_vmk_both_gone() {
+        let path = temp_db_path("destroy");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+        assert!(path.exists());
+
+        vault.destroy_vault_with_store(&store).unwrap();
+
+        assert!(!path.exists(), "database file should be deleted");
+        assert!(store.load_vmk().is_err(), "VMK should be destroyed");
+    }
+
+    #[test]
+    fn reopening_after_destroy_creates_a_brand_new_vault() {
+        let path = temp_db_path("destroy-reopen");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+        let old_vmk = *vault.vmk;
+        vault.destroy_vault_with_store(&store).unwrap();
+
+        let fresh = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+        assert_ne!(*fresh.vmk, old_vmk, "a fresh vault gets a fresh VMK");
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(fresh);
+        std::fs::remove_file(&path).unwrap();
     }
 }
