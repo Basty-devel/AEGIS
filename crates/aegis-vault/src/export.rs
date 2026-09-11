@@ -227,4 +227,149 @@ mod tests {
         drop(vault);
         std::fs::remove_file(&path).unwrap();
     }
+
+    /// A single flipped byte inside the ciphertext must fail AEAD
+    /// authentication and surface as `StorageCorrupted`, not a panic —
+    /// covers the `decrypt(...)` call's error path in
+    /// `decrypt_and_verify_export`.
+    #[test]
+    fn export_with_flipped_ciphertext_byte_fails_safely() {
+        let path = temp_db_path("export-tamper-byte");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault =
+            Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+        vault.put("messages", "msg-1", b"hello export").unwrap();
+
+        let signing_key = DualKeyPair::generate();
+        let mut export_bytes =
+            export_vault(&vault, &["messages"], &signing_key, "correct horse").unwrap();
+
+        // Flip a byte inside the ciphertext portion (after salt ||
+        // nonce) so AEAD authentication is what fails, not the length
+        // guard below.
+        assert!(
+            export_bytes.len() > ARGON2_SALT_LEN + AEAD_NONCE_LEN,
+            "fixture must have a non-empty ciphertext to tamper with"
+        );
+        let tamper_index = ARGON2_SALT_LEN + AEAD_NONCE_LEN;
+        export_bytes[tamper_index] ^= 0xFF;
+
+        match decrypt_and_verify_export(&export_bytes, "correct horse") {
+            Err(VaultError::StorageCorrupted(_)) => {}
+            Err(other) => panic!("expected StorageCorrupted, got {other:?}"),
+            Ok(_) => panic!("tampered export must not decrypt successfully"),
+        }
+
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A blob shorter than `ARGON2_SALT_LEN + AEAD_NONCE_LEN` must hit
+    /// the explicit length guard at the top of
+    /// `decrypt_and_verify_export` and return `StorageCorrupted`, not
+    /// panic on the `split_at` calls below it.
+    #[test]
+    fn export_truncated_below_header_length_fails_safely() {
+        let path = temp_db_path("export-truncated");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault =
+            Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+        vault.put("messages", "msg-1", b"hello export").unwrap();
+
+        let signing_key = DualKeyPair::generate();
+        let export_bytes =
+            export_vault(&vault, &["messages"], &signing_key, "correct horse").unwrap();
+
+        let truncated = &export_bytes[..ARGON2_SALT_LEN + AEAD_NONCE_LEN - 1];
+        match decrypt_and_verify_export(truncated, "correct horse") {
+            Err(VaultError::StorageCorrupted(msg)) => {
+                assert!(
+                    msg.contains("too short"),
+                    "expected the length-guard error message, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected StorageCorrupted, got {other:?}"),
+            Ok(_) => panic!("truncated export must not decrypt successfully"),
+        }
+
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Builds an export blob whose embedded signer public keys do not
+    /// match the key that actually produced the signature — simulating
+    /// a forged/mismatched signer-identity field — and asserts
+    /// `decrypt_and_verify_export` reports `valid == false`. This
+    /// exercises `verify_dual`'s AND-composition through this module's
+    /// own call site (key parsing, `records_json` re-serialization, and
+    /// the `verify_dual` call in `decrypt_and_verify_export`), so a
+    /// future local regression here — e.g. accidentally verifying
+    /// against the wrong bytes, or a copy-paste bug that always returns
+    /// `true` — would be caught even though `verify_dual` itself is
+    /// independently unit-tested in `aegis-crypto`.
+    #[test]
+    fn export_with_mismatched_signer_keys_fails_verification() {
+        let path = temp_db_path("export-bad-sig");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault =
+            Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+        vault.put("messages", "msg-1", b"hello export").unwrap();
+
+        let signing_key = DualKeyPair::generate();
+        let wrong_key = DualKeyPair::generate();
+        let passphrase = "correct horse";
+
+        // Replicate export_vault's framing by hand so we can embed
+        // `wrong_key`'s public keys alongside a signature that was
+        // actually produced by `signing_key`.
+        let mut records = BTreeMap::new();
+        let mut ns_records = BTreeMap::new();
+        for key in vault.list_keys("messages").unwrap() {
+            if let Some(plaintext) = vault.get("messages", &key).unwrap() {
+                ns_records.insert(key, B64.encode(&*plaintext));
+            }
+        }
+        records.insert("messages".to_string(), ns_records);
+
+        let unsigned_json = serde_json::to_vec(&records).unwrap();
+        let signature = signing_key.sign(&unsigned_json);
+
+        let signed = SignedExport {
+            records,
+            signer_ed25519_pub: B64.encode(wrong_key.ed25519_public_bytes()),
+            signer_ml_dsa87_pub: B64.encode(wrong_key.ml_dsa87_public_bytes()),
+            ed25519_sig: B64.encode(signature.ed25519),
+            ml_dsa87_sig: B64.encode(&signature.ml_dsa87),
+        };
+        let signed_json = serde_json::to_vec(&signed).unwrap();
+
+        let mut salt = [0u8; ARGON2_SALT_LEN];
+        getrandom::fill(&mut salt).unwrap();
+        let mut export_key = Zeroizing::new([0u8; 32]);
+        derive_master_key_production(passphrase.as_bytes(), &salt, b"", b"", export_key.as_mut())
+            .unwrap();
+        let mut nonce = [0u8; AEAD_NONCE_LEN];
+        getrandom::fill(&mut nonce).unwrap();
+        let ciphertext =
+            encrypt(AeadAlgorithm::Aes256Gcm, &export_key, &nonce, b"", &signed_json).unwrap();
+
+        let mut export_bytes =
+            Vec::with_capacity(ARGON2_SALT_LEN + AEAD_NONCE_LEN + ciphertext.len());
+        export_bytes.extend_from_slice(&salt);
+        export_bytes.extend_from_slice(&nonce);
+        export_bytes.extend_from_slice(&ciphertext);
+
+        let (_records, valid) = decrypt_and_verify_export(&export_bytes, passphrase).unwrap();
+        assert!(
+            !valid,
+            "signature must not verify when the embedded signer public keys \
+             don't match the key that actually signed the export"
+        );
+
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
 }
