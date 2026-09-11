@@ -113,7 +113,7 @@ impl HardwareKeyStore for KeyringBackend {
     }
 
     fn load_vmk(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
-        let secret = self.entry()?.get_secret().map_err(map_keyring_error)?;
+        let secret = Zeroizing::new(self.entry()?.get_secret().map_err(map_keyring_error)?);
         let array: [u8; 32] = secret.as_slice().try_into().map_err(|_| {
             VaultError::StorageCorrupted(format!(
                 "keyring VMK entry has wrong length: {} bytes, expected 32",
