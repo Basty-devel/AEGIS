@@ -78,11 +78,29 @@ fn set_sqlcipher_key(conn: &Connection, vmk: &[u8; 32]) -> Result<(), VaultError
     Ok(())
 }
 
+/// Enables SQLite's `secure_delete` in its `FAST` mode on `conn`.
+/// This is a per-connection PRAGMA (not persisted in the database
+/// file), so it must be set on every connection open, not just at
+/// creation. Without it, a `DELETE`/`UPDATE` that frees a B-tree page
+/// (e.g. `erase`'s `wrapped_dek = NULL`) only marks that page free —
+/// the old bytes physically remain on disk until some later write
+/// happens to reuse the page. `secure_delete = FAST` overwrites freed
+/// content with zeros in the common case, while skipping the extra
+/// cascading work of visiting other pages purely to hunt for freeable
+/// space — a reasonable balance for a local, typically-small personal
+/// vault database. This is a "Security-by-Default / Max-Only" floor:
+/// no code path may open a connection without it.
+fn enable_secure_delete(conn: &Connection) -> Result<(), VaultError> {
+    conn.execute_batch("PRAGMA secure_delete = FAST;")?;
+    Ok(())
+}
+
 /// Bootstrap a brand-new vault: open (creating) the file, key it,
 /// create the schema, and write the canary.
 pub(crate) fn create_new(db_path: &Path, vmk: &[u8; 32]) -> Result<Connection, VaultError> {
     let conn = Connection::open(db_path)?;
     set_sqlcipher_key(&conn, vmk)?;
+    enable_secure_delete(&conn)?;
     conn.execute_batch(SCHEMA)?;
 
     let canary_key = derive_canary_key(vmk);
@@ -113,6 +131,7 @@ pub(crate) fn create_new(db_path: &Path, vmk: &[u8; 32]) -> Result<Connection, V
 pub(crate) fn open_existing(db_path: &Path, vmk: &[u8; 32]) -> Result<Connection, VaultError> {
     let conn = Connection::open(db_path)?;
     set_sqlcipher_key(&conn, vmk)?;
+    enable_secure_delete(&conn)?;
 
     let canary_ct: Vec<u8> = conn
         .query_row(
@@ -171,6 +190,50 @@ mod tests {
         let result = open_existing(&path, &wrong_vmk);
         assert!(matches!(result, Err(VaultError::VmkCanaryMismatch)));
 
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn create_new_enables_secure_delete_fast() {
+        let path = temp_db_path("secure-delete-create");
+        let _ = std::fs::remove_file(&path);
+        let vmk = [0x33u8; 32];
+
+        let conn = create_new(&path, &vmk).unwrap();
+        let secure_delete: i64 = conn
+            .query_row("PRAGMA secure_delete;", [], |row| row.get(0))
+            .unwrap();
+        // SQLite encodes `PRAGMA secure_delete` as an integer: 0 = off,
+        // 1 = on, 2 = FAST. Verified empirically against this
+        // rusqlite/SQLite build rather than assumed.
+        assert_eq!(
+            secure_delete, 2,
+            "expected secure_delete = 2 (FAST) after create_new, got {secure_delete}"
+        );
+
+        drop(conn);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn open_existing_enables_secure_delete_fast() {
+        let path = temp_db_path("secure-delete-open");
+        let _ = std::fs::remove_file(&path);
+        let vmk = [0x44u8; 32];
+
+        create_new(&path, &vmk).unwrap();
+        let conn = open_existing(&path, &vmk).unwrap();
+        let secure_delete: i64 = conn
+            .query_row("PRAGMA secure_delete;", [], |row| row.get(0))
+            .unwrap();
+        // See `create_new_enables_secure_delete_fast` for why 2 is the
+        // expected value (FAST mode).
+        assert_eq!(
+            secure_delete, 2,
+            "expected secure_delete = 2 (FAST) after open_existing, got {secure_delete}"
+        );
+
+        drop(conn);
         std::fs::remove_file(&path).unwrap();
     }
 }

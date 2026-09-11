@@ -251,10 +251,17 @@ impl Vault {
     }
 
     /// Art. 17 per-record cryptographic shredding: destroys this
-    /// record's wrapped DEK (zeroizing the in-memory copy before the
-    /// `UPDATE`), leaving the ciphertext bytes in place but
-    /// permanently unrecoverable — see design spec Section 4. A
-    /// no-op if the key was already erased or never existed.
+    /// record's wrapped DEK by setting `wrapped_dek`/`dek_nonce` to
+    /// `NULL` via `UPDATE`, leaving the ciphertext bytes in place but
+    /// permanently unrecoverable — see design spec Section 4. The
+    /// erasure guarantee is entirely at the SQL layer: `erase` never
+    /// reads the old `wrapped_dek`/`dek_nonce` bytes into Rust memory
+    /// in the first place (no `SELECT` precedes the `UPDATE` below),
+    /// so there is no in-memory copy to zeroize here — the
+    /// disk-level guarantee that the destroyed bytes don't linger in
+    /// a freed SQLite page comes from `PRAGMA secure_delete = FAST`,
+    /// set on every connection in `db.rs`. A no-op if the key was
+    /// already erased or never existed.
     pub fn erase(&mut self, namespace: &str, key: &str) -> Result<(), VaultError> {
         self.conn.execute(
             "UPDATE vault_records SET wrapped_dek = NULL, dek_nonce = NULL
