@@ -287,6 +287,20 @@ impl Vault {
         }
         Ok(())
     }
+
+    /// GDPR Art. 20 export. `namespaces` selects which keyspaces to
+    /// include — most callers will want every namespace they know
+    /// about; this crate has no way to enumerate namespaces itself
+    /// since it doesn't track them as a first-class concept (design
+    /// spec Section 0).
+    pub fn export(
+        &self,
+        namespaces: &[&str],
+        signing_key: &aegis_crypto::signature::DualKeyPair,
+        passphrase: &str,
+    ) -> Result<Vec<u8>, VaultError> {
+        crate::export::export_vault(self, namespaces, signing_key, passphrase)
+    }
 }
 
 #[cfg(test)]
