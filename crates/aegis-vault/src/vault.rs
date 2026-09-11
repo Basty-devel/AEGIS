@@ -236,6 +236,33 @@ impl Vault {
 
         Ok(Some(Zeroizing::new(plaintext)))
     }
+
+    /// Lists every key currently readable in `namespace` — a key
+    /// whose DEK has been `erase`d is excluded, same as it is from
+    /// `get`.
+    pub fn list_keys(&self, namespace: &str) -> Result<Vec<String>, VaultError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key FROM vault_records WHERE namespace = ?1 AND wrapped_dek IS NOT NULL",
+        )?;
+        let keys = stmt
+            .query_map([namespace], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(keys)
+    }
+
+    /// Art. 17 per-record cryptographic shredding: destroys this
+    /// record's wrapped DEK (zeroizing the in-memory copy before the
+    /// `UPDATE`), leaving the ciphertext bytes in place but
+    /// permanently unrecoverable — see design spec Section 4. A
+    /// no-op if the key was already erased or never existed.
+    pub fn erase(&mut self, namespace: &str, key: &str) -> Result<(), VaultError> {
+        self.conn.execute(
+            "UPDATE vault_records SET wrapped_dek = NULL, dek_nonce = NULL
+             WHERE namespace = ?1 AND key = ?2",
+            rusqlite::params![namespace, key],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -464,5 +491,115 @@ mod tests {
         // before the temp file can be removed below.
         drop(vault);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn list_keys_returns_all_keys_in_a_namespace() {
+        let path = temp_db_path("list-keys");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("contacts", "alice", b"a").unwrap();
+        vault.put("contacts", "bob", b"b").unwrap();
+        vault.put("messages", "msg-1", b"m").unwrap();
+
+        let mut keys = vault.list_keys("contacts").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["alice".to_string(), "bob".to_string()]);
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn erase_makes_get_return_none() {
+        let path = temp_db_path("erase-get-none");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("messages", "secret", b"gone soon").unwrap();
+        vault.erase("messages", "secret").unwrap();
+
+        assert!(vault.get("messages", "secret").unwrap().is_none());
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn erase_excludes_the_key_from_list_keys() {
+        let path = temp_db_path("erase-list");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("contacts", "alice", b"a").unwrap();
+        vault.erase("contacts", "alice").unwrap();
+
+        assert!(vault.list_keys("contacts").unwrap().is_empty());
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn erase_destroys_the_dek_but_leaves_ciphertext_bytes_on_disk() {
+        // Proves erasure is real cryptographic shredding, not a
+        // database DELETE: the ciphertext survives untouched while
+        // the wrapped DEK needed to open it is gone.
+        let path = temp_db_path("erase-shred-proof");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.put("messages", "secret", b"shred me").unwrap();
+        let ciphertext_before: Vec<u8> = vault
+            .conn
+            .query_row(
+                "SELECT ciphertext FROM vault_records WHERE namespace = 'messages' AND key = 'secret'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        vault.erase("messages", "secret").unwrap();
+
+        let row: (Vec<u8>, Option<Vec<u8>>) = vault
+            .conn
+            .query_row(
+                "SELECT ciphertext, wrapped_dek FROM vault_records WHERE namespace = 'messages' AND key = 'secret'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, ciphertext_before, "ciphertext bytes must survive erase");
+        assert!(row.1.is_none(), "wrapped_dek must be gone after erase");
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn erase_of_a_missing_key_is_an_idempotent_no_op() {
+        let path = temp_db_path("erase-missing");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let mut vault = Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        vault.erase("messages", "never-existed").unwrap();
     }
 }
