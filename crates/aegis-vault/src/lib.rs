@@ -10,8 +10,8 @@ pub mod error;
 mod db;
 mod kdf;
 mod keystore;
-// mod vault;
+mod vault;
 // mod export;
 
 pub use error::VaultError;
-// pub use vault::{Vault, VaultConfig};
+pub use vault::{Vault, VaultConfig};

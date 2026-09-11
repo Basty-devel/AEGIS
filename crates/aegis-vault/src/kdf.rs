@@ -6,15 +6,6 @@ use hkdf::Hkdf;
 use sha2::Sha512;
 use zeroize::Zeroizing;
 
-// These three derive_* functions (and the `derive` helper they share)
-// have no caller within this task: Task 2 only establishes the KDF
-// wrapper itself. Task 5 (SQLCipher keying) calls
-// `derive_sqlcipher_key`, Task 6 (per-record DEK wrapping) calls
-// `derive_dek_wrap_key`, and Task 7 (vault_meta canary) calls
-// `derive_canary_key` — see this task's brief, "Produces" line.
-// `#[allow(dead_code)]` is scoped to exactly these so an accidental
-// future dead function elsewhere in this file would still be caught.
-#[allow(dead_code)]
 fn derive(vmk: &[u8; 32], label: &[u8]) -> Zeroizing<[u8; 32]> {
     let hk = Hkdf::<Sha512>::new(None, vmk);
     let mut out = Zeroizing::new([0u8; 32]);
@@ -24,19 +15,19 @@ fn derive(vmk: &[u8; 32], label: &[u8]) -> Zeroizing<[u8; 32]> {
 }
 
 /// The key SQLCipher's page cipher is keyed with (via `PRAGMA key`).
-#[allow(dead_code)]
 pub(crate) fn derive_sqlcipher_key(vmk: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     derive(vmk, b"AEGIS-VAULT-SQLCIPHER-KEY-v1")
 }
 
-/// The key that wraps (encrypts) each record's per-record DEK.
+/// The key that wraps (encrypts) each record's per-record DEK. Not
+/// yet called outside tests — lands with per-record DEK wrapping in
+/// a later task.
 #[allow(dead_code)]
 pub(crate) fn derive_dek_wrap_key(vmk: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     derive(vmk, b"AEGIS-VAULT-DEK-WRAP-v1")
 }
 
 /// The key that encrypts the `vault_meta` canary value.
-#[allow(dead_code)]
 pub(crate) fn derive_canary_key(vmk: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     derive(vmk, b"AEGIS-VAULT-CANARY-v1")
 }

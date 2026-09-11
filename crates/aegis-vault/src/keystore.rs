@@ -9,14 +9,12 @@ use zeroize::Zeroizing;
 
 /// Zero-fallback boundary: the only way anything in this crate can
 /// obtain or store a Vault Master Key.
-// `KeyringBackend` (Task 4, below) is now a real, non-test
-// implementor, but nothing in non-test code constructs it or calls
-// through this trait yet — that lands with `Vault::open` in Task 6.
-// Remove this `allow` once that wiring exists.
-#[allow(dead_code)]
 pub(crate) trait HardwareKeyStore {
     fn store_vmk(&self, vmk: &[u8; 32]) -> Result<(), VaultError>;
     fn load_vmk(&self) -> Result<Zeroizing<[u8; 32]>, VaultError>;
+    // No non-test caller until `destroy_vault` (Task 9) calls it.
+    // Remove this `allow` once that lands.
+    #[allow(dead_code)]
     fn destroy_vmk(&self) -> Result<(), VaultError>;
 }
 
@@ -87,14 +85,10 @@ impl HardwareKeyStore for MockKeyStore {
 /// (the crate's default) automatically selects Windows Credential
 /// Manager on Windows and the Secret Service (via `zbus`) on *nix —
 /// one implementation covers both platforms in Phase 1's scope.
-// Not yet constructed outside tests until `Vault::open` (Task 6)
-// wires it in. Remove this `allow` once that lands.
-#[allow(dead_code)]
 pub(crate) struct KeyringBackend {
     service_name: String,
 }
 
-#[allow(dead_code)]
 impl KeyringBackend {
     pub(crate) fn new(service_name: impl Into<String>) -> Self {
         Self {
@@ -133,10 +127,6 @@ impl HardwareKeyStore for KeyringBackend {
 /// couldn't be reached — the zero-fallback trigger. Everything else
 /// is a store-level failure this crate can't recover from either, so
 /// it's folded into the same variant with its detail preserved.
-// Only reachable through `KeyringBackend`'s methods above, which are
-// themselves unused in non-test code until Task 6. Remove this
-// `allow` alongside the ones on `KeyringBackend`.
-#[allow(dead_code)]
 fn map_keyring_error(err: keyring::Error) -> VaultError {
     match err {
         keyring::Error::NoDefaultStore | keyring::Error::NoStorageAccess(_) => {

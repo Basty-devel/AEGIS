@@ -11,21 +11,9 @@ use rusqlite::Connection;
 use std::path::Path;
 use zeroize::Zeroizing;
 
-// `create_new`/`open_existing` (and everything only they call — the
-// consts below, `hex_encode`, `set_sqlcipher_key`) have no caller
-// within this task: Task 5 only establishes the bootstrap functions
-// themselves. Task 6 (`Vault::open`) is what wires them in. Until
-// then the non-test build's dead-code pass can't see the `#[cfg(test)]`
-// module below that already exercises them, so it flags the whole
-// chain. `#[allow(dead_code)]` is scoped to exactly these items so an
-// accidental future dead function elsewhere in this file would still
-// be caught. Mirrors the same situation documented in `kdf.rs`.
-#[allow(dead_code)]
 const CANARY_PLAINTEXT: &[u8] = b"AEGIS-VAULT-CANARY-v1";
-#[allow(dead_code)]
 const CANARY_NONCE: [u8; 12] = [0u8; 12]; // fixed: one canary row, one key, written exactly once per vault.
 
-#[allow(dead_code)]
 const SCHEMA: &str = "
 CREATE TABLE vault_meta (
     key   TEXT PRIMARY KEY,
@@ -52,7 +40,6 @@ CREATE TABLE vault_records (
 /// blob literal — `PRAGMA key = "x'<hex>'"` — which we build by hand
 /// here, keeping every intermediate buffer `Zeroizing` since each one
 /// transiently holds the key material.
-#[allow(dead_code)]
 fn hex_encode(bytes: &[u8]) -> Zeroizing<String> {
     const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = Zeroizing::new(String::with_capacity(bytes.len() * 2));
@@ -63,7 +50,6 @@ fn hex_encode(bytes: &[u8]) -> Zeroizing<String> {
     out
 }
 
-#[allow(dead_code)]
 fn set_sqlcipher_key(conn: &Connection, vmk: &[u8; 32]) -> Result<(), VaultError> {
     let sqlcipher_key = derive_sqlcipher_key(vmk);
     let hex_key = hex_encode(sqlcipher_key.as_slice());
@@ -94,7 +80,6 @@ fn set_sqlcipher_key(conn: &Connection, vmk: &[u8; 32]) -> Result<(), VaultError
 
 /// Bootstrap a brand-new vault: open (creating) the file, key it,
 /// create the schema, and write the canary.
-#[allow(dead_code)]
 pub(crate) fn create_new(db_path: &Path, vmk: &[u8; 32]) -> Result<Connection, VaultError> {
     let conn = Connection::open(db_path)?;
     set_sqlcipher_key(&conn, vmk)?;
@@ -125,7 +110,6 @@ pub(crate) fn create_new(db_path: &Path, vmk: &[u8; 32]) -> Result<Connection, V
 /// caller's loaded VMK, and verify the canary decrypts. This is the
 /// zero-fallback-adjacent correctness check for the VMK itself — see
 /// `VaultError::VmkCanaryMismatch`.
-#[allow(dead_code)]
 pub(crate) fn open_existing(db_path: &Path, vmk: &[u8; 32]) -> Result<Connection, VaultError> {
     let conn = Connection::open(db_path)?;
     set_sqlcipher_key(&conn, vmk)?;
