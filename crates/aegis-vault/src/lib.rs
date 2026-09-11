@@ -7,9 +7,9 @@
 //! Depends on `aegis-crypto` only.
 
 pub mod error;
+mod db;
 mod kdf;
 mod keystore;
-// mod db;
 // mod vault;
 // mod export;
 
