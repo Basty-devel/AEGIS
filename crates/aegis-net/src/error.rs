@@ -1,9 +1,13 @@
-//! Crate-wide error type for `aegis-net`.
+//! Crate-wide error types for `aegis-net`.
 //!
+//! [`NetError`] covers the capability-token and rate-limiting engine
+//! (Section 6.3); [`TransportError`] covers the `Transport` layer
+//! (Section 6.1) — two independent tracks (see
+//! `docs/superpowers/specs/2026-09-12-aegis-net-capability-tokens-design.md`
+//! and `docs/superpowers/specs/2026-09-12-aegis-net-transport-phase1-design.md`).
 //! Every fallible operation that can be driven by attacker-controlled
-//! bytes — a capability token presented by a peer or relay — returns
-//! [`NetError`] rather than panicking, consistent with every other
-//! crate in this workspace.
+//! bytes or network conditions returns one of these rather than
+//! panicking, consistent with every other crate in this workspace.
 
 use core::fmt;
 
@@ -114,9 +118,85 @@ impl fmt::Display for NetError {
 
 impl std::error::Error for NetError {}
 
+/// Errors from `aegis-net`'s `Transport` layer — dialing, hosting, and
+/// operating a byte-stream connection over Tor (or, in tests, the
+/// in-memory `FakeTransport`).
+///
+/// Non-exhaustive: new failure modes may be added without a semver
+/// break. Variants are split by retryability, not merely by which
+/// underlying call failed — see each variant's doc comment.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TransportError {
+    /// The Tor client failed to bootstrap (e.g. consensus fetch or
+    /// guard selection failed). Retrying identically is unlikely to
+    /// help without investigating why.
+    Bootstrap(String),
+
+    /// Bootstrapping did not complete within the configured
+    /// `TorTransportConfig::bootstrap_timeout`. Distinct from
+    /// [`TransportError::Bootstrap`]: retryable with backoff, since the
+    /// network may simply be slow or degraded rather than broken.
+    BootstrapTimeout,
+
+    /// A `TransportAddr` string was malformed. Not retryable — the
+    /// caller must supply a different address.
+    InvalidAddress(String),
+
+    /// A `TorTransportConfig` was rejected at construction (e.g. a
+    /// zero `bootstrap_timeout`, or `state_dir`/`cache_dir` could not
+    /// be created). Not retryable without changing the configuration.
+    InvalidConfig(String),
+
+    /// Dialing a peer failed (unreachable, circuit build failure).
+    Connect(String),
+
+    /// Launching an onion service failed (rejected configuration, key
+    /// conflict, or hosting disabled in this client's configuration).
+    HostingFailed(String),
+
+    /// An I/O failure on an already-established stream.
+    Io(std::io::Error),
+
+    /// `TransportListener::accept` was called after the listener was
+    /// shut down. Distinct from [`TransportError::Io`]: this means
+    /// stop calling `accept`, not that one particular accepted stream
+    /// failed.
+    ListenerClosed,
+}
+
+impl From<std::io::Error> for TransportError {
+    fn from(err: std::io::Error) -> Self {
+        TransportError::Io(err)
+    }
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransportError::Bootstrap(msg) => write!(f, "Tor bootstrap failed: {msg}"),
+            TransportError::BootstrapTimeout => {
+                f.write_str("Tor bootstrap did not complete within the configured timeout")
+            }
+            TransportError::InvalidAddress(msg) => write!(f, "invalid transport address: {msg}"),
+            TransportError::InvalidConfig(msg) => {
+                write!(f, "invalid Tor transport configuration: {msg}")
+            }
+            TransportError::Connect(msg) => write!(f, "connect failed: {msg}"),
+            TransportError::HostingFailed(msg) => {
+                write!(f, "hosting an onion service failed: {msg}")
+            }
+            TransportError::Io(err) => write!(f, "transport I/O error: {err}"),
+            TransportError::ListenerClosed => f.write_str("listener has been shut down"),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {}
+
 #[cfg(test)]
 mod tests {
-    use super::NetError;
+    use super::{NetError, TransportError};
 
     #[test]
     fn display_names_the_offending_values() {
@@ -140,5 +220,25 @@ mod tests {
         let crypto_err = aegis_crypto::CryptoError::InvalidPeerPublicKey;
         let net_err: NetError = crypto_err.into();
         assert!(matches!(net_err, NetError::Crypto(_)));
+    }
+
+    #[test]
+    fn transport_error_display_includes_the_inner_message() {
+        let err = TransportError::Connect("peer unreachable".to_string());
+        let rendered = err.to_string();
+        assert!(rendered.contains("peer unreachable"), "{rendered}");
+    }
+
+    #[test]
+    fn transport_error_implements_std_error() {
+        fn assert_error<E: std::error::Error>(_: &E) {}
+        assert_error(&TransportError::ListenerClosed);
+    }
+
+    #[test]
+    fn io_error_converts_to_transport_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
+        let transport_err: TransportError = io_err.into();
+        assert!(matches!(transport_err, TransportError::Io(_)));
     }
 }
