@@ -18,6 +18,7 @@
 pub const SECURITY_DISCLAIMER: &str = aegis_crypto::SECURITY_DISCLAIMER;
 
 pub mod capability;
+pub mod transport;
 pub mod error;
 pub mod rate_limit;
 
