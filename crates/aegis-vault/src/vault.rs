@@ -43,8 +43,16 @@ impl Vault {
     /// no file exists there yet. Both paths go through
     /// `HardwareKeyStore` — if the OS credential store can't be
     /// reached, this returns `Err` and no vault is created or opened.
+    ///
+    /// Each `db_path` gets its own credential-store entry even when
+    /// several vaults share one `keyring_service_name`, so opening one
+    /// vault can never overwrite another's VMK. If a VMK already
+    /// exists for this `db_path` but the database file does not (a
+    /// deleted or not-yet-mounted file), this returns
+    /// `VaultError::VmkAlreadyExists` rather than minting a fresh VMK
+    /// over the old one.
     pub fn open(config: VaultConfig) -> Result<Self, VaultError> {
-        let store = KeyringBackend::new(config.keyring_service_name.clone());
+        let store = KeyringBackend::new(config.keyring_service_name.clone(), &config.db_path)?;
         Self::open_with_store(&config.db_path, &store, config.keyring_service_name)
     }
 
@@ -64,6 +72,26 @@ impl Vault {
         let vmk = if db_exists {
             store.load_vmk()?
         } else {
+            // No database file — but that is not on its own proof that
+            // no vault lives at this credential-store identity. A file
+            // can be absent because it was deleted, moved, restored
+            // from a backup that hasn't landed yet, or sits on a volume
+            // that isn't mounted, while its VMK survives untouched in
+            // the credential store. Minting a fresh VMK here would
+            // overwrite that one and permanently destroy the vault it
+            // protects — including the SQLCipher page key derived from
+            // it — on a call that returns `Ok`. So probe first and
+            // refuse rather than overwrite; the caller has to resolve
+            // the collision explicitly.
+            match store.load_vmk() {
+                Ok(_) => return Err(VaultError::VmkAlreadyExists),
+                // The only outcome that proves this identity is free.
+                Err(VaultError::VmkMissing) => {}
+                // Anything else (notably a store that can't be
+                // reached) propagates unchanged: zero-fallback.
+                Err(other) => return Err(other),
+            }
+
             let mut vmk = Zeroizing::new([0u8; 32]);
             getrandom::fill(vmk.as_mut()).map_err(|_| {
                 VaultError::StorageCorrupted("OS RNG failure generating VMK".into())
@@ -271,7 +299,11 @@ impl Vault {
     /// deleting the file itself is a best-effort second step, not
     /// where the erasure guarantee lives.
     pub fn destroy_vault(self) -> Result<(), VaultError> {
-        let store = KeyringBackend::new(self.keyring_service_name.clone());
+        // Must reconstruct the *same* credential-store identity
+        // `open` used, which is `(service_name, db_path)` — destroying
+        // a VMK derived from any other path would leave this vault's
+        // own VMK alive and kill an unrelated vault's instead.
+        let store = KeyringBackend::new(self.keyring_service_name.clone(), &self.db_path)?;
         self.destroy_vault_with_store(&store)
     }
 
@@ -385,7 +417,7 @@ mod tests {
         // rather than returning the orphaned-but-valid key.
         let load_result = store.load_vmk();
         assert!(
-            matches!(load_result, Err(VaultError::StorageCorrupted(_))),
+            matches!(load_result, Err(VaultError::VmkMissing)),
             "expected no VMK to remain stored after cleanup, got: {load_result:?}"
         );
 
@@ -400,6 +432,112 @@ mod tests {
         // before the temp file can be removed below.
         drop(vault);
         std::fs::remove_file(&good_path).unwrap();
+    }
+
+    /// The create path must never overwrite a VMK that is already
+    /// present for this credential-store identity. Scenario: the
+    /// database file was deleted or moved (or lives on an unmounted
+    /// volume) while its VMK survived. Before this guard, `open` took
+    /// the create branch and `store_vmk` silently destroyed the
+    /// still-live key — irreversible data loss on a success path.
+    #[test]
+    fn open_refuses_to_create_over_an_existing_vmk() {
+        let path = temp_db_path("open-existing-vmk");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+
+        // Simulate "credential entry survives, database file doesn't".
+        let preexisting_vmk = [0x5Au8; 32];
+        store.store_vmk(&preexisting_vmk).unwrap();
+        assert!(!path.exists(), "precondition: no database file");
+
+        match Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()) {
+            Err(VaultError::VmkAlreadyExists) => {}
+            Err(other) => panic!("expected VmkAlreadyExists, got: {other:?}"),
+            Ok(_) => panic!("open must not silently create a vault over an existing VMK"),
+        }
+
+        // The pre-existing VMK must be exactly as it was: untouched,
+        // not replaced by a freshly generated one.
+        assert_eq!(
+            *store.load_vmk().unwrap(),
+            preexisting_vmk,
+            "the pre-existing VMK must not have been overwritten"
+        );
+        assert!(
+            !path.exists(),
+            "no database file may be created on the refused path"
+        );
+    }
+
+    /// The refusal above must be recoverable: once the stale
+    /// credential is explicitly destroyed, creating a vault at the same
+    /// path succeeds normally.
+    #[test]
+    fn creating_succeeds_after_the_stale_vmk_is_explicitly_destroyed() {
+        let path = temp_db_path("open-existing-vmk-recover");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        store.store_vmk(&[0x5Bu8; 32]).unwrap();
+
+        assert!(matches!(
+            Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()),
+            Err(VaultError::VmkAlreadyExists)
+        ));
+
+        store.destroy_vmk().unwrap();
+        let vault =
+            Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+
+        // Windows keeps an exclusive file lock for as long as the
+        // underlying SQLite handle is open, so it must be dropped
+        // before the temp file can be removed below.
+        drop(vault);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// An existing database file whose VMK has vanished from the
+    /// credential store must report `VmkMissing` — the honest "your
+    /// data is unrecoverable" signal — and must not be mistaken for a
+    /// store that is merely unreachable.
+    #[test]
+    fn open_of_an_existing_db_with_no_stored_vmk_reports_vmk_missing() {
+        let path = temp_db_path("open-db-without-vmk");
+        let _ = std::fs::remove_file(&path);
+        let store = MockKeyStore::new();
+        let vault =
+            Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()).unwrap();
+        drop(vault);
+        assert!(path.exists());
+
+        // Simulate a wiped keychain: the file stays, the credential
+        // goes away.
+        store.destroy_vmk().unwrap();
+
+        match Vault::open_with_store(&path, &store, "aegis-vault-test".to_string()) {
+            Err(VaultError::VmkMissing) => {}
+            Err(other) => panic!("expected VmkMissing, got: {other:?}"),
+            Ok(_) => panic!("an existing database must not open without its VMK"),
+        }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Two vaults at different paths sharing one service name must
+    /// address different credential entries. This asserts the identity
+    /// derivation `KeyringBackend` uses, which is what makes the
+    /// cross-vault clobber structurally impossible; the real backend's
+    /// own round trip is covered by `keystore::real_backend_tests`.
+    #[test]
+    fn two_vault_paths_derive_different_credential_identities() {
+        let a = temp_db_path("identity-a");
+        let b = temp_db_path("identity-b");
+        let username_a = crate::keystore::vmk_username_for_path(&a).unwrap();
+        let username_b = crate::keystore::vmk_username_for_path(&b).unwrap();
+        assert_ne!(
+            username_a, username_b,
+            "two db_paths under one service name must not share a credential entry"
+        );
     }
 
     #[test]

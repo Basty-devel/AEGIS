@@ -12,6 +12,23 @@ pub enum VaultError {
     /// initialized. This is the zero-fallback trigger — there is no
     /// other code path that can obtain or store a VMK.
     HardwareKeyStoreUnavailable(String),
+    /// The credential store was reached successfully, but holds no VMK
+    /// for this vault's credential-store identity. This is a
+    /// well-formed "nothing stored here" answer, *not* a broken store:
+    /// distinguishing the two matters because a missing VMK for an
+    /// existing database means that database's contents are
+    /// permanently unrecoverable (profile reset, keychain wipe,
+    /// machine migration), while
+    /// `HardwareKeyStoreUnavailable` is potentially transient.
+    VmkMissing,
+    /// The credential store already holds a VMK at this vault's
+    /// credential-store identity, but no database file exists at
+    /// `db_path`. Creating a vault here would overwrite that VMK and
+    /// irrecoverably destroy whatever it protects, so `Vault::open`
+    /// refuses instead. The caller must resolve the collision
+    /// explicitly (point at the right path, or destroy the stale
+    /// credential first).
+    VmkAlreadyExists,
     /// A VMK was loaded but failed to decrypt the stored canary —
     /// either the wrong key or a corrupted store.
     VmkCanaryMismatch,
@@ -50,6 +67,19 @@ impl fmt::Display for VaultError {
             VaultError::HardwareKeyStoreUnavailable(detail) => {
                 write!(f, "hardware-backed key store unavailable: {detail}")
             }
+            VaultError::VmkMissing => {
+                write!(
+                    f,
+                    "no vault master key found in the credential store for this vault"
+                )
+            }
+            VaultError::VmkAlreadyExists => {
+                write!(
+                    f,
+                    "a vault master key already exists in the credential store for this vault, \
+                     but no database file exists at its path; refusing to overwrite it"
+                )
+            }
             VaultError::VmkCanaryMismatch => {
                 write!(f, "vault master key failed canary verification")
             }
@@ -82,6 +112,36 @@ mod tests {
     fn hardware_key_store_unavailable_includes_detail() {
         let err = VaultError::HardwareKeyStoreUnavailable("no Secret Service daemon".into());
         assert!(err.to_string().contains("no Secret Service daemon"));
+    }
+
+    /// `VmkMissing` must read as "nothing is stored", never as "the
+    /// store is broken" — the whole point of splitting it out of
+    /// `HardwareKeyStoreUnavailable` is that a user seeing this
+    /// message must not be led into "retry / reboot" thinking.
+    #[test]
+    fn vmk_missing_display_says_not_found_not_unavailable() {
+        let message = VaultError::VmkMissing.to_string();
+        assert!(
+            message.contains("no vault master key found"),
+            "expected a 'not found' message, got: {message}"
+        );
+        assert!(
+            !message.contains("unavailable"),
+            "VmkMissing must not read as an unavailable store, got: {message}"
+        );
+    }
+
+    #[test]
+    fn vmk_already_exists_display_explains_the_refusal() {
+        let message = VaultError::VmkAlreadyExists.to_string();
+        assert!(
+            message.contains("already exists"),
+            "expected an 'already exists' message, got: {message}"
+        );
+        assert!(
+            message.contains("refusing to overwrite"),
+            "expected the message to state the refusal, got: {message}"
+        );
     }
 
     #[test]
