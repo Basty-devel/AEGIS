@@ -53,8 +53,13 @@ pub(crate) fn export_vault(
         records.insert(namespace.to_string(), ns_records);
     }
 
-    let unsigned_json = serde_json::to_vec(&records)
-        .map_err(|e| VaultError::StorageCorrupted(format!("export serialization failed: {e}")))?;
+    // This buffer holds the base64-encoded plaintext of every exported
+    // record and exists only to be hashed by `sign` below — a pure
+    // intermediate, so it is wiped as soon as the signature is taken
+    // rather than left in freed heap memory.
+    let unsigned_json = Zeroizing::new(serde_json::to_vec(&records).map_err(|e| {
+        VaultError::StorageCorrupted(format!("export serialization failed: {e}"))
+    })?);
     let signature = signing_key.sign(&unsigned_json);
 
     let signed = SignedExport {
@@ -133,8 +138,13 @@ pub(crate) fn decrypt_and_verify_export(
     let signed: SignedExport = serde_json::from_slice(&signed_json)
         .map_err(|e| VaultError::StorageCorrupted(format!("malformed export JSON: {e}")))?;
 
-    let records_json = serde_json::to_vec(&signed.records)
-        .map_err(|e| VaultError::StorageCorrupted(format!("re-serialization failed: {e}")))?;
+    // Same category of data as `signed_json` above — the base64
+    // plaintext of every exported record, re-serialized purely so the
+    // signature can be checked over exactly the bytes that were signed.
+    // Wiped on drop for the same reason.
+    let records_json = Zeroizing::new(serde_json::to_vec(&signed.records).map_err(|e| {
+        VaultError::StorageCorrupted(format!("re-serialization failed: {e}"))
+    })?);
 
     let ed25519_pub: [u8; 32] = B64
         .decode(&signed.signer_ed25519_pub)
@@ -163,7 +173,22 @@ pub(crate) fn decrypt_and_verify_export(
         },
     );
 
-    let records_value = serde_json::to_value(&signed.records)
+    // `records_value` cannot itself be `Zeroizing`: `zeroize`'s
+    // blanket impls cover `Z: Zeroize` (and `Copy + DefaultIsZeroes`),
+    // and `serde_json::Value` — a recursive enum over `String`,
+    // `Vec<Value>` and `Map<String, Value>` — implements neither, so
+    // `Zeroizing<serde_json::Value>` does not compile. It is also this
+    // function's return value: the caller asked for exactly this
+    // plaintext, so wiping it here would defeat the call.
+    //
+    // What is avoidable is the *extra* copy. Building the `Value` by
+    // re-parsing `records_json` (which is `Zeroizing`, and would have
+    // been dropped un-wiped had we serialized a second time via
+    // `serde_json::to_value(&signed.records)`) means the only
+    // plaintext-bearing buffers that outlive this line are the caller's
+    // own `Value` and `signed` itself — no unwiped intermediate
+    // serialization buffer is left behind.
+    let records_value: serde_json::Value = serde_json::from_slice(&records_json)
         .map_err(|e| VaultError::StorageCorrupted(format!("value conversion failed: {e}")))?;
     Ok((records_value, valid))
 }
