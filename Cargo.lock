@@ -48,10 +48,21 @@ version = "0.1.0"
 [[package]]
 name = "aegis-file"
 version = "0.1.0"
+dependencies = [
+ "aegis-crypto",
+ "blake3",
+ "hex",
+ "zeroize",
+]
 
 [[package]]
 name = "aegis-net"
 version = "0.1.0"
+dependencies = [
+ "aegis-crypto",
+ "getrandom",
+ "hex",
+]
 
 [[package]]
 name = "aegis-ratchet"
