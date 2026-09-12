@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 aegis-crypto = { path = "../aegis-crypto" }
-rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.39.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 keyring = "4.2"
 hkdf = "0.13"
 sha2 = "0.11"
