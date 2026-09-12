@@ -2,6 +2,10 @@
 name = "aegis-vault"
 version.workspace = true
 edition.workspace = true
+description = "SQLCipher-encrypted local storage with hardware-backed (Windows Credential Manager / Linux Secret Service) key isolation and GDPR Art. 17/20 compliance engines for the AegisPQC messenger. NOT independently audited."
+license = "PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
+repository.workspace = true
 
 [lints]
 workspace = true
