@@ -23,6 +23,7 @@ pub mod transport;
 pub mod fake;
 pub mod error;
 pub mod rate_limit;
+mod background;
 
 pub use capability::{CapabilityToken, MAX_TOKEN_VALIDITY_SECONDS};
 pub use error::NetError;
