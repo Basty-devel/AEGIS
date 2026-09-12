@@ -19,6 +19,8 @@ pub const SECURITY_DISCLAIMER: &str = aegis_crypto::SECURITY_DISCLAIMER;
 
 pub mod capability;
 pub mod transport;
+#[cfg(any(test, feature = "testing"))]
+pub mod fake;
 pub mod error;
 pub mod rate_limit;
 

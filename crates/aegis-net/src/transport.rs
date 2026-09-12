@@ -90,6 +90,48 @@ impl fmt::Display for TransportAddr {
     }
 }
 
+/// A byte-stream transport: dial a peer's [`TransportAddr`], or host
+/// one of your own and accept incoming connections. Implemented by
+/// `crate::tor::TorTransport` (real, Tor-backed) and
+/// `crate::fake::FakeTransport` (in-memory, test-only).
+///
+/// `Stream` is `Read + Write`, not async — this lets a `Self::Stream`
+/// be handed directly to `aegis-ratchet`'s envelope serialization or
+/// `aegis-file`'s `encrypt_stream`/`decrypt_stream` without an adapter.
+/// See the design doc's "Sync Facade" section.
+pub trait Transport {
+    /// The connected byte stream this transport produces.
+    type Stream: std::io::Read + std::io::Write + Send;
+    /// The listener this transport's [`Transport::host`] produces.
+    type Listener: TransportListener<Stream = Self::Stream>;
+
+    /// Dials `addr`, blocking until the connection is established or
+    /// fails.
+    fn connect(&self, addr: &TransportAddr) -> Result<Self::Stream, TransportError>;
+
+    /// Hosts a listener reachable at some [`TransportAddr`] (see
+    /// [`TransportListener::local_addr`]). `nickname` identifies this
+    /// hosting session to the underlying implementation (e.g. maps to
+    /// `arti`'s `HsNickname` for a real onion service). Blocks only
+    /// long enough to start hosting — accepting connections happens via
+    /// the returned listener's [`TransportListener::accept`].
+    fn host(&self, nickname: &str) -> Result<Self::Listener, TransportError>;
+}
+
+/// A listening endpoint produced by [`Transport::host`].
+pub trait TransportListener {
+    /// The connected byte stream [`TransportListener::accept`]
+    /// produces — always the same type as its owning
+    /// [`Transport::Stream`].
+    type Stream: std::io::Read + std::io::Write + Send;
+
+    /// Blocks until a peer connects, or the listener errors.
+    fn accept(&self) -> Result<Self::Stream, TransportError>;
+
+    /// The address a peer would dial to reach this listener.
+    fn local_addr(&self) -> TransportAddr;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
