@@ -12,13 +12,13 @@ message/contact schemas — see this crate's design spec for why.
 
 ## What this is
 
-- **Hardware-backed key isolation, zero-fallback** ([`keystore`]) — a
+- **Hardware-backed key isolation, zero-fallback** ([`keystore`](src/keystore.rs)) — a
   random Vault Master Key (VMK) lives only in the OS credential store
   (Windows Credential Manager / Linux Secret Service, via the
   `keyring` crate's `v1` API) and is never written to disk by this
   crate. If the OS store can't be reached, `Vault::open` fails outright
   — there is no lower-security fallback path anywhere in this crate.
-- **Per-record envelope encryption** ([`vault`]) — every record gets
+- **Per-record envelope encryption** ([`vault`](src/vault.rs)) — every record gets
   its own random Data Encryption Key (DEK), encrypted with
   `aegis_crypto::aead` (AES-256-GCM) and wrapped under a VMK-derived
   key. SQLCipher's own page cipher (AES-256-CBC + HMAC-SHA512 — not
@@ -30,7 +30,7 @@ message/contact schemas — see this crate's design spec for why.
   file until VACUUM. `Vault::destroy_vault` destroys VMK itself,
   instantly invalidating every record — and the SQLCipher key, which
   is VMK-derived — at once.
-- **GDPR Art. 20 export** ([`export`]) — every readable record, as
+- **GDPR Art. 20 export** ([`export`](src/export.rs)) — every readable record, as
   JSON, signed with the caller's dual (Ed25519 + ML-DSA-87) identity
   key, encrypted under an Argon2id key derived from a
   caller-supplied passphrase.
@@ -46,7 +46,7 @@ discipline.
 
 Nothing in this crate panics on data an attacker or a corrupted disk
 controls. Malformed stored records, unreachable hardware key stores,
-and SQLCipher failures all return [`error::VaultError`]
+and SQLCipher failures all return [`error::VaultError`](src/error.rs)
 (`#[non_exhaustive]`).
 
 ## License

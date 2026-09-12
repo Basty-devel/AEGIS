@@ -14,10 +14,10 @@
 
 pub mod error;
 mod db;
-pub mod export;
+mod export;
 mod kdf;
-pub mod keystore;
-pub mod vault;
+mod keystore;
+mod vault;
 
 pub use error::VaultError;
 pub use vault::{Vault, VaultConfig};
