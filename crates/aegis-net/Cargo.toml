@@ -2,8 +2,17 @@
 name = "aegis-net"
 version.workspace = true
 edition.workspace = true
+description = "Federated mailbox networking, capability-token abuse resistance, and Sealed Sender 2.0 for the AegisPQC messenger. NOT independently audited."
+license = "PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
+repository.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
+aegis-crypto = { path = "../aegis-crypto", version = "0.1.4" }
+getrandom = "0.4.3"
+
+[dev-dependencies]
+hex = "0.4.3"
