@@ -20,3 +20,15 @@ repository = "https://github.com/Basty-devel/AEGIS"
 # identified FFI/hardware-binding crates, which override this with a
 # narrowly scoped `#[allow(unsafe_code)]` at the point of use.
 unsafe_code = "deny"
+
+# No [patch.crates-io] section: bp512-nestler >=0.2.0 depends on
+# nestler-primeorder -> nestler-wnaf -> nestler-hybrid-array (real,
+# published crates.io dependencies, each a minimal fork/replacement one
+# link up the chain) instead of a patched hybrid-array, so aegis-crypto
+# no longer needs a workspace-local patch to build against a version of
+# hybrid-array that covers array size 513. See bp512-nestler's README
+# for the full chain and rationale. This is also what unblocks
+# `cargo publish -p aegis-crypto`: a [patch.crates-io] entry never
+# travels with a published crate's own verification build, so as long
+# as one existed anywhere in this workspace, publishing was impossible
+# regardless of what the patch pointed at.

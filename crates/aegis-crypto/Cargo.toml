@@ -1,9 +1,44 @@
 [package]
 name = "aegis-crypto"
-version.workspace = true
+# Overrides workspace.package's version rather than inheriting it:
+# this crate is versioned independently since it's the only workspace
+# member published so far. 0.1.4 adds additive, non-breaking key-export
+# methods (Brainpool512SecretKey::to_bytes/from_bytes,
+# MlKem1024KeyPair::to_seed_bytes/from_seed_bytes) needed by
+# aegis-ratchet's RatchetState serialization.
+version = "0.1.4"
 edition.workspace = true
+description = "Hybrid post-quantum cryptographic primitives (ML-KEM-1024, ML-DSA-87, brainpoolP512r1, AEAD, Argon2id) for the AegisPQC messenger. NOT independently audited."
+license = "PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
+repository.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
+aead = "0.6.1"
+aes-gcm = "0.11.1"
+argon2 = "0.6.0"
+blake3 = "1.8.7"
+bp512-nestler = "0.2.0"
+chacha20poly1305 = "0.11.0"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+elliptic-curve = { version = "0.14.1", features = ["ecdh"] }
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+# `zeroize` is NOT a default feature of either post-quantum crate; without
+# it `ml_dsa::SigningKey` and `ml_kem::DecapsulationKey` keep their secret
+# material in memory after drop. Spec Section 2 mandates zeroization, so
+# both features are enabled explicitly here.
+ml-dsa = { version = "0.1.1", features = ["zeroize"] }
+ml-kem = { version = "0.3.2", features = ["zeroize"] }
+sha2 = "0.11.0"
+signature = "3.0.0"
+subtle = "2.6.1"
+zeroize = { version = "1.9.0", features = ["derive"] }
+
+[dev-dependencies]
+hex = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
