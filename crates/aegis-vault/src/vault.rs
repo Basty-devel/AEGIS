@@ -11,11 +11,39 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+/// Configuration for opening or creating a vault.
+///
+/// Two vaults with different [`db_path`](Self::db_path) values never
+/// share a credential-store entry, even when they use the same
+/// [`keyring_service_name`](Self::keyring_service_name).
+///
+/// # Examples
+///
+/// ```no_run
+/// use aegis_vault::VaultConfig;
+/// use std::path::Path;
+///
+/// let config = VaultConfig {
+///     db_path: Path::new("my-vault.db").to_path_buf(),
+///     keyring_service_name: "com.example.myapp".into(),
+/// };
+/// ```
 pub struct VaultConfig {
+    /// Path to the SQLCipher database file. If the file does not exist
+    /// when [`Vault::open`] is called, a new vault is created here.
+    /// If it does exist, the existing vault is opened.
     pub db_path: PathBuf,
+    /// Application-level service name passed to the OS credential store.
+    /// Different applications should use different service names to
+    /// avoid VMK collisions.
     pub keyring_service_name: String,
 }
 
+/// A namespaced, encrypted key/value store backed by SQLCipher with
+/// hardware-backed key isolation.
+///
+/// See the [crate-level documentation](crate) for architecture,
+/// security model, and a quick-start example.
 pub struct Vault {
     pub(crate) conn: Connection,
     pub(crate) vmk: Zeroizing<[u8; 32]>,
@@ -51,6 +79,29 @@ impl Vault {
     /// deleted or not-yet-mounted file), this returns
     /// `VaultError::VmkAlreadyExists` rather than minting a fresh VMK
     /// over the old one.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use aegis_vault::{Vault, VaultConfig};
+    /// use std::path::Path;
+    ///
+    /// let config = VaultConfig {
+    ///     db_path: Path::new("my-vault.db").to_path_buf(),
+    ///     keyring_service_name: "com.example.myapp".into(),
+    /// };
+    /// let vault = Vault::open(config).unwrap();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::HardwareKeyStoreUnavailable`] — the OS credential store
+    ///   could not be reached.
+    /// - [`VaultError::VmkAlreadyExists`] — a VMK already exists for a different
+    ///   database at this path; refusing to overwrite.
+    /// - [`VaultError::StorageCorrupted`] — the canary verification failed or
+    ///   the database is corrupt.
+    /// - [`VaultError::Sqlite`] — SQLCipher connection failure.
     pub fn open(config: VaultConfig) -> Result<Self, VaultError> {
         let store = KeyringBackend::new(config.keyring_service_name.clone(), &config.db_path)?;
         Self::open_with_store(&config.db_path, &store, config.keyring_service_name)
@@ -138,6 +189,25 @@ impl Vault {
     /// `(namespace, key)` row. See design spec Section 1 for why the
     /// DEK is random and stored (not derived) — that's what makes
     /// `erase` (Task 8) a real cryptographic-shredding guarantee.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use std::path::Path;
+    /// # let config = VaultConfig {
+    /// #     db_path: Path::new("my-vault.db").to_path_buf(),
+    /// #     keyring_service_name: "com.example.myapp".into(),
+    /// # };
+    /// # let mut vault = Vault::open(config).unwrap();
+    /// vault.put("messages", "alice@example.com", b"hello").unwrap();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::StorageCorrupted`] — OS RNG failure, AEAD failure, or
+    ///   DEK-wrapping failure.
+    /// - [`VaultError::Sqlite`] — SQLCipher write failure.
     pub fn put(&mut self, namespace: &str, key: &str, plaintext: &[u8]) -> Result<(), VaultError> {
         let mut dek = Zeroizing::new([0u8; 32]);
         getrandom::fill(dek.as_mut())
@@ -200,6 +270,27 @@ impl Vault {
     /// Returns `Ok(None)` if `(namespace, key)` has no record, or has
     /// been `erase`d (Task 8) — from the caller's perspective those
     /// two cases are indistinguishable, which is the point.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use std::path::Path;
+    /// # let config = VaultConfig {
+    /// #     db_path: Path::new("my-vault.db").to_path_buf(),
+    /// #     keyring_service_name: "com.example.myapp".into(),
+    /// # };
+    /// # let mut vault = Vault::open(config).unwrap();
+    /// # vault.put("messages", "alice@example.com", b"hello").unwrap();
+    /// let plaintext = vault.get("messages", "alice@example.com").unwrap();
+    /// assert_eq!(&*plaintext.unwrap(), b"hello");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::StorageCorrupted`] — the record is malformed (wrong nonce
+    ///   lengths, failed AEAD unwrap, or DEK unwrap failure).
+    /// - [`VaultError::Sqlite`] — SQLCipher read failure.
     pub fn get(&self, namespace: &str, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, VaultError> {
         // `wrapped_dek`/`dek_nonce`: `Option` because `erase` (Task 8)
         // sets them `NULL` in place rather than deleting the row.
@@ -260,6 +351,26 @@ impl Vault {
     /// Lists every key currently readable in `namespace` — a key
     /// whose DEK has been `erase`d is excluded, same as it is from
     /// `get`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use std::path::Path;
+    /// # let config = VaultConfig {
+    /// #     db_path: Path::new("my-vault.db").to_path_buf(),
+    /// #     keyring_service_name: "com.example.myapp".into(),
+    /// # };
+    /// # let mut vault = Vault::open(config).unwrap();
+    /// # vault.put("messages", "alice@example.com", b"hello").unwrap();
+    /// # vault.put("messages", "bob@example.com", b"world").unwrap();
+    /// let keys = vault.list_keys("messages").unwrap();
+    /// assert!(keys.contains(&"alice@example.com".to_string()));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::Sqlite`] — SQLCipher read failure.
     pub fn list_keys(&self, namespace: &str) -> Result<Vec<String>, VaultError> {
         let mut stmt = self.conn.prepare(
             "SELECT key FROM vault_records WHERE namespace = ?1 AND wrapped_dek IS NOT NULL",
@@ -282,6 +393,25 @@ impl Vault {
     /// a freed SQLite page comes from `PRAGMA secure_delete = FAST`,
     /// set on every connection in `db.rs`. A no-op if the key was
     /// already erased or never existed.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use std::path::Path;
+    /// # let config = VaultConfig {
+    /// #     db_path: Path::new("my-vault.db").to_path_buf(),
+    /// #     keyring_service_name: "com.example.myapp".into(),
+    /// # };
+    /// # let mut vault = Vault::open(config).unwrap();
+    /// # vault.put("messages", "alice@example.com", b"hello").unwrap();
+    /// vault.erase("messages", "alice@example.com").unwrap();
+    /// assert!(vault.get("messages", "alice@example.com").unwrap().is_none());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::Sqlite`] — SQLCipher write failure.
     pub fn erase(&mut self, namespace: &str, key: &str) -> Result<(), VaultError> {
         self.conn.execute(
             "UPDATE vault_records SET wrapped_dek = NULL, dek_nonce = NULL
@@ -298,6 +428,26 @@ impl Vault {
     /// already makes the file's contents permanently unrecoverable —
     /// deleting the file itself is a best-effort second step, not
     /// where the erasure guarantee lives.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use std::path::Path;
+    /// # let config = VaultConfig {
+    /// #     db_path: Path::new("my-vault.db").to_path_buf(),
+    /// #     keyring_service_name: "com.example.myapp".into(),
+    /// # };
+    /// # let vault = Vault::open(config).unwrap();
+    /// vault.destroy_vault().unwrap();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::Sqlite`] — SQLCipher failure while deleting the
+    ///   database file.
+    /// - [`VaultError::Io`] — filesystem failure while deleting the database
+    ///   file.
     pub fn destroy_vault(self) -> Result<(), VaultError> {
         // Must reconstruct the *same* credential-store identity
         // `open` used, which is `(service_name, db_path)` — destroying
@@ -325,6 +475,27 @@ impl Vault {
     /// about; this crate has no way to enumerate namespaces itself
     /// since it doesn't track them as a first-class concept (design
     /// spec Section 0).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use std::path::Path;
+    /// # let config = VaultConfig {
+    /// #     db_path: Path::new("my-vault.db").to_path_buf(),
+    /// #     keyring_service_name: "com.example.myapp".into(),
+    /// # };
+    /// # let vault = Vault::open(config).unwrap();
+    /// // Export requires a dual identity key pair from aegis-crypto.
+    /// // See the design spec Section 4 for details.
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::StorageCorrupted`] — serialization failure, OS RNG failure,
+    ///   Argon2id failure, or AEAD failure.
+    /// - [`VaultError::Crypto`] — signing failure from `aegis-crypto`.
+    /// - [`VaultError::Sqlite`] — SQLCipher read failure.
     pub fn export(
         &self,
         namespaces: &[&str],
