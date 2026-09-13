@@ -12,8 +12,12 @@ workspace = true
 
 [dependencies]
 aegis-crypto = { path = "../aegis-crypto", version = "0.1.4" }
+arti-client = { version = "0.46.0", features = ["onion-service-client", "onion-service-service", "static-sqlite"] }
 getrandom = "0.4.3"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "io-util", "time", "sync", "macros"] }
+tor-cell = "0.46.0"
+tor-hsservice = "0.46.0"
+tor-rtcompat = "0.46.0"
 
 [dev-dependencies]
 hex = "0.4.3"
