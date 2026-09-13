@@ -29,9 +29,9 @@
 //! prefixes below additionally prevent a leaf hash from ever being
 //! confused with an internal node hash (a second, independent
 //! second-preimage defence RFC 6962 also specifies). See
-//! [`tests::naive_last_node_duplication_gives_a_different_root_than_rfc6962`]
-//! for a test pinning that this implementation does not fall back to
-//! that weaker scheme.
+//! a `tests::naive_last_node_duplication_gives_a_different_root_than_rfc6962`
+//! regression test — this implementation does not fall back to that weaker
+//! scheme.
 
 use crate::error::FileError;
 
