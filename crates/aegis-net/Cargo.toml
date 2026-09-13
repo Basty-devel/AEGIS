@@ -1,17 +1,22 @@
 [package]
 name = "aegis-net"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
+rust-version = "1.75"
 description = "Federated mailbox networking, capability-token abuse resistance, and Sealed Sender 2.0 for the AegisPQC messenger. NOT independently audited."
 license = "PolyForm-Noncommercial-1.0.0"
 readme = "README.md"
 repository.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 
 [dependencies]
-aegis-crypto = { path = "../aegis-crypto", version = "0.1.4" }
+aegis-crypto = { path = "../aegis-crypto", version = "0.1.5" }
 arti-client = { version = "0.46.0", default-features = false, features = ["compression", "keymgr", "onion-service-client", "onion-service-service", "rustls", "static-sqlite", "tokio"] }
 getrandom = "0.4.3"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "io-util", "time", "sync", "macros"] }

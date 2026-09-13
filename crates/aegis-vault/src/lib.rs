@@ -29,7 +29,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use aegis_vault::{Vault, VaultConfig};
+//! use aegis_vault_pqc::{Vault, VaultConfig};
 //! use std::path::Path;
 //!
 //! let config = VaultConfig {

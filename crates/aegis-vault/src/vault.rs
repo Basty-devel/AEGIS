@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 /// # Examples
 ///
 /// ```no_run
-/// use aegis_vault::VaultConfig;
+/// use aegis_vault_pqc::VaultConfig;
 /// use std::path::Path;
 ///
 /// let config = VaultConfig {
@@ -83,7 +83,7 @@ impl Vault {
     /// # Examples
     ///
     /// ```no_run
-    /// use aegis_vault::{Vault, VaultConfig};
+    /// use aegis_vault_pqc::{Vault, VaultConfig};
     /// use std::path::Path;
     ///
     /// let config = VaultConfig {
@@ -193,7 +193,7 @@ impl Vault {
     /// # Examples
     ///
     /// ```no_run
-    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use aegis_vault_pqc::{Vault, VaultConfig};
     /// # use std::path::Path;
     /// # let config = VaultConfig {
     /// #     db_path: Path::new("my-vault.db").to_path_buf(),
@@ -274,7 +274,7 @@ impl Vault {
     /// # Examples
     ///
     /// ```no_run
-    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use aegis_vault_pqc::{Vault, VaultConfig};
     /// # use std::path::Path;
     /// # let config = VaultConfig {
     /// #     db_path: Path::new("my-vault.db").to_path_buf(),
@@ -355,7 +355,7 @@ impl Vault {
     /// # Examples
     ///
     /// ```no_run
-    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use aegis_vault_pqc::{Vault, VaultConfig};
     /// # use std::path::Path;
     /// # let config = VaultConfig {
     /// #     db_path: Path::new("my-vault.db").to_path_buf(),
@@ -397,7 +397,7 @@ impl Vault {
     /// # Examples
     ///
     /// ```no_run
-    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use aegis_vault_pqc::{Vault, VaultConfig};
     /// # use std::path::Path;
     /// # let config = VaultConfig {
     /// #     db_path: Path::new("my-vault.db").to_path_buf(),
@@ -432,7 +432,7 @@ impl Vault {
     /// # Examples
     ///
     /// ```no_run
-    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use aegis_vault_pqc::{Vault, VaultConfig};
     /// # use std::path::Path;
     /// # let config = VaultConfig {
     /// #     db_path: Path::new("my-vault.db").to_path_buf(),
@@ -479,7 +479,7 @@ impl Vault {
     /// # Examples
     ///
     /// ```no_run
-    /// # use aegis_vault::{Vault, VaultConfig};
+    /// # use aegis_vault_pqc::{Vault, VaultConfig};
     /// # use std::path::Path;
     /// # let config = VaultConfig {
     /// #     db_path: Path::new("my-vault.db").to_path_buf(),
