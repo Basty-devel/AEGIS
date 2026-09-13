@@ -1,9 +1,23 @@
 [package]
 name = "aegis-core"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
+rust-version = "1.75"
+description = "Unified runtime facade for AegisPQC — composes the leaf crates (crypto, ratchet, vault, file, net) into a single typed entry point. NOT independently audited."
+license = "PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
+repository.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true
 
 [dependencies]
+aegis-crypto = "0.1.5"
+aegis-ratchet = "0.1.1"
+aegis-vault-pqc = "0.1.0"
+aegis-file = "0.1.1"
+aegis-net = "0.1.0"
