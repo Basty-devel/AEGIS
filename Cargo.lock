@@ -21,10 +21,17 @@ dependencies = [
 [[package]]
 name = "aegis-core"
 version = "0.1.0"
+dependencies = [
+ "aegis-crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aegis-file 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aegis-net 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aegis-ratchet 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aegis-vault-pqc 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "aegis-crypto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aead",
  "aes-gcm",
@@ -48,16 +55,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-crypto"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4474aafcadf2450483715c60fb4c659279edcdaaae754c5cd73e440742688dc2"
+dependencies = [
+ "aead",
+ "aes-gcm",
+ "argon2",
+ "blake3",
+ "bp512-nestler",
+ "chacha20poly1305",
+ "ed25519-dalek 3.0.0",
+ "elliptic-curve 0.14.1",
+ "getrandom 0.4.3",
+ "hkdf 0.13.0",
+ "ml-dsa",
+ "ml-kem",
+ "sha2 0.11.0",
+ "signature 3.0.0",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "aegis-ffi"
 version = "0.1.0"
 
 [[package]]
 name = "aegis-file"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "aegis-crypto",
+ "aegis-crypto 0.1.5",
  "blake3",
  "hex",
+ "zeroize",
+]
+
+[[package]]
+name = "aegis-file"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ecf5ba63c5c76787675ef21f8e83181a3bc5faec17cdd77979fc7b1ee105898"
+dependencies = [
+ "aegis-crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "blake3",
  "zeroize",
 ]
 
@@ -65,7 +107,7 @@ dependencies = [
 name = "aegis-net"
 version = "0.1.0"
 dependencies = [
- "aegis-crypto",
+ "aegis-crypto 0.1.5",
  "arti-client",
  "getrandom 0.4.3",
  "hex",
@@ -76,10 +118,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-net"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93f84b95cff61f1e9466ca2c10a8f56d0aff793232f9ab3381400758610f0622"
+dependencies = [
+ "aegis-crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "arti-client",
+ "getrandom 0.4.3",
+ "tokio",
+ "tor-cell",
+ "tor-hsservice",
+ "tor-rtcompat",
+]
+
+[[package]]
 name = "aegis-ratchet"
 version = "0.1.1"
 dependencies = [
- "aegis-crypto",
+ "aegis-crypto 0.1.5",
  "getrandom 0.4.3",
  "hex",
  "hkdf 0.13.0",
@@ -89,13 +146,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-vault"
+name = "aegis-ratchet"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ca7bbc0d13f2594e0aff198e25918bfaa0d393cd3c878ed31f8633cf8aad188"
+dependencies = [
+ "aegis-crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "getrandom 0.4.3",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
+name = "aegis-vault-pqc"
 version = "0.1.0"
 dependencies = [
- "aegis-crypto",
+ "aegis-crypto 0.1.5",
  "base64",
  "getrandom 0.4.3",
  "hex",
+ "hkdf 0.13.0",
+ "keyring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
+name = "aegis-vault-pqc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e1335527eee8bf69c4b2ad7629f413271251f840f2c25207ca249ca5fe4babb"
+dependencies = [
+ "aegis-crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "base64",
+ "getrandom 0.4.3",
  "hkdf 0.13.0",
  "keyring",
  "rusqlite",
