@@ -17,6 +17,27 @@
 //! 21      ..    chunk_count ciphertext chunks, back to back
 //! ```
 //!
+//! # Cipher choice — who picks, and the trade-off
+//!
+//! The header's `algorithm` byte is written by the **sender**
+//! (`encrypt_stream`'s `AeadAlgorithm` argument) and read by the
+//! receiver (`decrypt_stream` dispatches on it). The AEAD dispatcher
+//! lives in `aegis_crypto::aead` — see
+//! [`aegis_crypto::aead::AeadAlgorithm`] for a full suitability matrix
+//! and why **both** ciphers are supported:
+//!
+//! - **AES-256-GCM** — constant-time via AES-NI / ARMv8 Crypto; much
+//!   faster where hardware acceleration exists; otherwise its AES rounds
+//!   can expose cache-timing signal in pure software.
+//! - **ChaCha20-Poly1305** — constant-time by construction, fast in pure
+//!   software (mobile, wasm, non-x86), naturally resistant to
+//!   cache-timing side channels without special hardware.
+//!
+//! Policy: **offer both. AES preferred where HW exists, ChaCha20
+//! fallback otherwise. The frontend should negotiate and let the user
+//! override.** No negotiation happens inside this crate — the wire byte
+//! makes the receiver's choice deterministic.
+//!
 //! No length prefix precedes each chunk: `plaintext_len` and
 //! `chunk_count` alone determine every chunk's exact plaintext size
 //! (every chunk is [`CHUNK_SIZE`] bytes of plaintext except the last,
