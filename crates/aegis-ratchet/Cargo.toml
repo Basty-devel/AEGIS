@@ -1,9 +1,27 @@
 [package]
 name = "aegis-ratchet"
-version.workspace = true
+# Overrides workspace.package's version rather than inheriting it, same
+# as aegis-crypto: this crate is independently published, while the
+# other workspace members sharing workspace.package's version are still
+# unpublished scaffolding. 0.1.1 adds the README/LICENSE/readme-field
+# documentation published after the initial 0.1.0 release.
+version = "0.1.1"
 edition.workspace = true
+description = "PQ-X3DH key agreement and Double Ratchet session protocol (hybrid post-quantum/classical) for the AegisPQC messenger. NOT independently audited."
+license = "PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
+repository.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
+aegis-crypto = { path = "../aegis-crypto", version = "0.1.4" }
+zeroize = { version = "1.9", features = ["derive"] }
+hkdf = "0.13"
+sha2 = "0.11"
+hmac = "0.13"
+getrandom = "0.4"
+
+[dev-dependencies]
+hex = "0.4"
