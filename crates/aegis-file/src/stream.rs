@@ -38,7 +38,7 @@
 //!
 //! `algorithm`, `plaintext_len`, and `chunk_count` travel in the clear
 //! in the header, but every chunk's AEAD authenticated-associated-data
-//! includes all three (see [`chunk_aad`]), plus that chunk's own index.
+//! includes all three (in `chunk_aad`), plus that chunk's own index.
 //! Without this, a relay could shorten a file by truncating trailing
 //! chunks *and* patching `chunk_count`/`plaintext_len` in the header to
 //! match — every remaining chunk would still individually authenticate
@@ -46,11 +46,9 @@
 //! "succeed" on a silently truncated file. Binding the header fields
 //! into every chunk's AAD means the attacker cannot patch the header
 //! without invalidating every already-encrypted chunk, since they lack
-//! the key to re-encrypt under the new AAD — see
-//! [`tests::truncating_chunks_and_patching_the_header_is_detected`].
+//! the key to re-encrypt under the new AAD.
 //! The chunk index is additionally bound for defence in depth on top of
-//! the nonce counter already being index-derived (see
-//! [`tests::reordering_two_chunks_fails_to_decrypt`]).
+//! the nonce counter already being index-derived.
 
 use crate::error::FileError;
 use crate::merkle::{leaf_hash, MerkleTree};

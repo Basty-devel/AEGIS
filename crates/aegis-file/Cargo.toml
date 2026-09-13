@@ -1,11 +1,16 @@
 [package]
 name = "aegis-file"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
+rust-version = "1.75"
 description = "Chunked AEAD file streaming engine (up to 1 GiB) with BLAKE3 Merkle tree integrity verification and bounded 4 MiB memory buffering for the AegisPQC messenger. NOT independently audited."
 license = "PolyForm-Noncommercial-1.0.0"
 readme = "README.md"
 repository.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

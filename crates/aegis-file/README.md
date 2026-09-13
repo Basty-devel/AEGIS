@@ -101,6 +101,58 @@ malformed wire header, a tampered, truncated, reordered, or
 header-patched ciphertext stream, and a wrong key all return
 [`error::FileError`] (`#[non_exhaustive]`).
 
+## Quick start
+
+```toml
+# Cargo.toml
+[dependencies]
+aegis-file = "0.1.0"
+aegis-crypto = "0.1.4"
+```
+
+```rust
+use aegis_crypto::aead::AeadAlgorithm;
+use aegis_file::{encrypt_stream, decrypt_stream};
+use std::io::Cursor;
+
+let key = [0x2au8; 32];
+let plaintext = b"hello world";
+
+let mut ciphertext = Vec::new();
+let manifest = encrypt_stream(
+    AeadAlgorithm::Aes256Gcm,
+    &key,
+    &plaintext.len().to_string(),
+    Cursor::new(&plaintext[..]),
+    &mut ciphertext,
+)
+.unwrap();
+
+// The root hash travels through the authenticated ratchet envelope,
+// not the ciphertext stream itself.
+let manifest_trusted = manifest;
+
+let mut recovered = Vec::new();
+decrypt_stream(
+    &key,
+    Cursor::new(&ciphertext[..]),
+    &manifest_trusted,
+    &mut recovered,
+)
+.unwrap();
+assert_eq!(plaintext.as_slice(), &recovered);
+```
+
+## Limitations
+
+- **No transport or storage** — this crate is a pure streaming engine;
+  callers own the mailbox protocol (`aegis-net`) and vault storage
+  (`aegis-vault-pqc`).
+- **Whole-file Merkle computed in one pass** — streaming *encryption*
+  incrementally builds the Merkle root; *decryption* re-derives it. A
+  resumable single-chunk proof path is out of scope until `aegis-net`
+  consumes `merkle::MerkleTree` directly.
+
 ## License
 
 [PolyForm Noncommercial 1.0.0](LICENSE) — free for noncommercial use;
