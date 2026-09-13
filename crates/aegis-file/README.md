@@ -153,6 +153,25 @@ assert_eq!(plaintext.as_slice(), &recovered);
   resumable single-chunk proof path is out of scope until `aegis-net`
   consumes `merkle::MerkleTree` directly.
 
+## Cipher choice
+
+Both `AES-256-GCM` and `ChaCha20-Poly1305` are supported (wire byte
+`0`/`1`, see [`stream`](src/stream.rs)). The **sender picks**; the
+receiver dispatches. Prefer **AES-256-GCM** where hardware acceleration
+(AES-NI / ARMv8 Crypto) is present; fall back to **ChaCha20-Poly1305**
+on software-only targets. Why:
+
+| Cipher | Hardware | Software | Side-channel | Good when |
+|---|---:|---:|---:|---|
+| **AES-256-GCM** | AES-NI/ARMv8 Crypto → fast & constant-time | AES rounds can leak via cache timing | Constant-time only with HW | x86_64 / modern ARM with AES-NI |
+| **ChaCha20-Poly1305** | No HW needed | Constant-time by construction, fast in pure software | Naturally cache-timing resistant | Mobile, wasm, non-x86 |
+
+Non-reuse invariant is the same for both: never reuse `(key, nonce)`.
+Aegis's per-file random salt + per-chunk counter guarantees this within one
+file/key. **Frontend:** expose a selector (default AES, ChaCha fallback
+or explicit user override) — negotiation at the file/net layer, not
+inside the AEAD dispatcher.
+
 ## License
 
 [PolyForm Noncommercial 1.0.0](LICENSE) — free for noncommercial use;

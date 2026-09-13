@@ -88,16 +88,39 @@ impl ChunkNonceSequence {
 
 /// Which AEAD cipher [`encrypt`]/[`decrypt`] should use.
 ///
-/// Both variants take a 256-bit key and a 96-bit nonce and produce a
-/// ciphertext with a 16-byte authentication tag appended, per spec
-/// Section 2. Neither variant is a default recommendation over the
-/// other here — the caller (protocol layer) picks based on the
-/// negotiated cipher suite.
+/// Both variants take a 256-bit key and a 96-bit nonce and produce
+/// ciphertext with a 16-byte tag, per `AEGIS.Plan.V0.2.md` §2. Wire
+/// APIs negotiate/expose both (`byte 0 = AES-256-GCM, byte 1 =
+/// ChaCha20-Poly1305` in `aegis-file`); the sender chooses, the receiver
+/// dispatches. Prefer **AES-256-GCM** where hardware acceleration exists;
+/// fall back to **ChaCha20-Poly1305** on targets without it.
+///
+/// # Suitability matrix
+///
+/// | Property | AES-256-GCM (NIST SP 800-38D) | ChaCha20-Poly1305 (RFC 8439) |
+/// |---|---:|---:|
+/// | HW acceleration | Constant-time via AES-NI / ARMv8 Crypto; much faster on x86_64 / modern ARM | None needed |
+/// | Software speed | Slower / vulnerable cache-timing signal without HW | Constant-time by construction, fast in pure software (mobile, wasm, non-x86) |
+/// | Nonce-reuse fragility | Catastrophic: leaks XOR plaintexts + GHASH auth key → forgeries | Still fatal, but same class — never reuse (key, nonce) with either |
+/// | Standards adoption | NIST; hardware side-channel is the HW | IETF; constant-time without special instruction support |
+///
+/// # Negotiation note (protocol + frontend)
+///
+/// The low-level `aead` module exposes both algorithms; higher layers
+/// pick. Recommended policy: wire-negotiate (aegis-file header) and
+/// expose a selector in the frontend (default AES, ChaCha20 fallback or
+/// explicit user override). Keep the wire mapping explicit (`0/1` bytes)
+/// and round-trip-tested. Do **not** silently fall back in `aead` itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AeadAlgorithm {
-    /// AES-256-GCM (NIST SP 800-38D).
+    /// AES-256-GCM (NIST SP 800-38D). Prefer where AES-NI / ARMv8 Crypto
+    /// hardware is present; constant-time via instructions. Fastest on
+    /// x86_64 / modern ARM.
     Aes256Gcm,
-    /// ChaCha20-Poly1305 (RFC 8439).
+    /// ChaCha20-Poly1305 (RFC 8439). Pure-software constant-time; fastest
+    /// on mobile / wasm / CPUs without AES acceleration, naturally
+    /// resistant to cache-timing side channels. Use as the fallback or
+    /// as a user-selectable alternative.
     ChaCha20Poly1305,
 }
 

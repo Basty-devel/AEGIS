@@ -1,6 +1,6 @@
 [package]
 name = "aegis-file"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version = "1.75"
 description = "Chunked AEAD file streaming engine (up to 1 GiB) with BLAKE3 Merkle tree integrity verification and bounded 4 MiB memory buffering for the AegisPQC messenger. NOT independently audited."

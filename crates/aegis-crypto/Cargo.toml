@@ -6,7 +6,7 @@ name = "aegis-crypto"
 # methods (Brainpool512SecretKey::to_bytes/from_bytes,
 # MlKem1024KeyPair::to_seed_bytes/from_seed_bytes) needed by
 # aegis-ratchet's RatchetState serialization.
-version = "0.1.4"
+version = "0.1.5"
 edition.workspace = true
 description = "Hybrid post-quantum cryptographic primitives (ML-KEM-1024, ML-DSA-87, brainpoolP512r1, AEAD, Argon2id) for the AegisPQC messenger. NOT independently audited."
 license = "PolyForm-Noncommercial-1.0.0"
